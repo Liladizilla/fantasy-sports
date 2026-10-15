@@ -2,7 +2,8 @@
 
 Every POST here goes to an injected ``http_post`` that records what it was
 handed and answers with a body shaped exactly like a capture in
-``docs/research/05-espn-write-surface/`` (league ``99``). The reads a write
+``docs/research/05-espn-write-surface/`` or, for adds, drops, claims and
+cancels, ``docs/research/06-espn-add-drop-surface/`` (league ``99``). The reads a write
 depends on -- the bootstrap, ``mNav`` -- replay the committed synthetic
 cassette through the read transport's ``http`` seam, with ``mNav`` supplied as
 an override because no cassette records it.
@@ -501,7 +502,7 @@ def test_the_request_carries_espn_s2_only_and_the_web_clients_headers():
     assert call["json"]["isLeagueManager"] is False
 
 
-def test_a_free_agent_add_and_drop_uses_the_community_item_shape():
+def test_a_free_agent_add_and_drop_sends_the_captured_item_shape():
     post = FakePost(_captured_response("p3-swap-execute", type="FREEAGENT"))
     _provider(post).move_players(
         *LEAGUE, "1", adds=[RosterMove("3001", to_slot="BE")], drops=[RosterMove("2003")]
@@ -1268,3 +1269,161 @@ def test_a_per_call_mode_is_restored_even_when_the_call_fails():
     with pytest.raises(RuntimeError), transport.mode_for_call(CacheMode.BYPASS):
         raise RuntimeError("boom")
     assert transport._call_mode is None
+
+
+# --------------------------------------------------------------------------- #
+# Add / drop / waiver shapes, captured in a test league (#108)
+# --------------------------------------------------------------------------- #
+
+CAPTURES_06 = CAPTURES.parent / "06-espn-add-drop-surface"
+
+
+def _capture_06(name: str) -> dict[str, Any]:
+    return json.loads((CAPTURES_06 / f"{name}.json").read_text())
+
+
+def _captured_06_response(name: str) -> FakeResponse:
+    response = _capture_06(name)["response"]
+    body = json.loads(json.dumps(response["body"]).replace("{SWID-REDACTED}", SWID))
+    # The captures are team 7 in period 6; the synthetic league is team 1 in period 2.
+    if isinstance(body, dict) and body.get("teamId") == 7:
+        body["teamId"] = 1
+    return FakeResponse(status_code=response["status"], body=body)
+
+
+def _captured_06_request(name: str) -> dict[str, Any]:
+    """A captured request body, re-addressed to the synthetic league's team 1, period 2."""
+    body = _capture_06(name)["request"]["body"]
+    text = json.dumps(body).replace('"teamId": 7', '"teamId": 1')
+    text = text.replace('"toTeamId": 7', '"toTeamId": 1').replace(
+        '"fromTeamId": 7', '"fromTeamId": 1'
+    )
+    body = json.loads(text)
+    body["scoringPeriodId"] = 2
+    return body
+
+
+def test_a_bidless_waiver_claim_is_the_captured_body_and_comes_back_pending():
+    """FAAB-off leagues reject every bid, so a claim there is ``waiver=True``
+    with no ``bidAmount`` -- the body p4 sent and ESPN accepted as PENDING."""
+    post = FakePost(_captured_06_response("p4-waiver-claim-with-drop"))
+    result = _provider(post).move_players(
+        *LEAGUE, "1", adds=[RosterMove("9000030")], drops=[RosterMove("9000023")], waiver=True
+    )
+    assert post.body == _captured_06_request("p4-waiver-claim-with-drop")
+    assert "bidAmount" not in post.body
+    assert result.status == "PENDING"
+    assert result.is_pending is True
+    assert result.provider_transaction_id == "<uuid-1>"
+    assert result.bid_amount == 0
+
+
+def test_a_bid_still_rides_on_the_claim_when_given():
+    post = FakePost(_captured_06_response("p4-waiver-claim-with-drop"))
+    _provider(post).move_players(
+        *LEAGUE, "1", adds=[RosterMove("9000030")], drops=[], waiver=True, bid=0
+    )
+    assert post.body["type"] == "WAIVER"
+    assert post.body["bidAmount"] == 0
+
+
+def test_an_add_slot_is_sent_as_to_lineup_slot_id_as_captured():
+    post = FakePost(_captured_06_response("p7c-claim-add-with-toLineupSlotId-20"))
+    _provider(post).move_players(
+        *LEAGUE,
+        "1",
+        adds=[RosterMove("9000030", to_slot="BE")],
+        drops=[RosterMove("9000023")],
+        waiver=True,
+    )
+    assert post.body == _captured_06_request("p7c-claim-add-with-toLineupSlotId-20")
+
+
+def test_a_standalone_drop_is_a_roster_transaction_not_a_free_agent_one():
+    """``FREEAGENT`` must carry exactly one ``ADD`` (p6b); a drop alone goes in
+    a ``ROSTER`` envelope, which ESPN validated down to the player (p6c)."""
+    post = FakePost(_captured_06_response("p6c-roster-drop-player-not-on-team"))
+    with pytest.raises(WriteRejectedError) as caught:
+        _provider(post).move_players(*LEAGUE, "1", adds=[], drops=[RosterMove("9000030")])
+    assert post.body == _captured_06_request("p6c-roster-drop-player-not-on-team")
+    assert caught.value.kind == "already_dropped"
+    assert caught.value.provider_type == "TRAN_PLAYER_NOT_ON_TEAM"
+    assert caught.value.remediation == "Player 9000030 is not on team 7"
+
+
+def test_an_add_with_a_drop_is_one_free_agent_transaction():
+    post = FakePost(_captured_06_response("p4-waiver-claim-with-drop"))
+    _provider(post).move_players(
+        *LEAGUE, "1", adds=[RosterMove("9000030")], drops=[RosterMove("9000023")]
+    )
+    assert post.body["type"] == "FREEAGENT"
+    assert post.body["items"] == _captured_06_request("p4-waiver-claim-with-drop")["items"]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "fragment"),
+    [
+        ({"adds": [RosterMove("1"), RosterMove("2")], "drops": []}, "one player"),
+        ({"adds": [RosterMove("1"), RosterMove("2")], "drops": [], "waiver": True}, "one player"),
+        ({"adds": [], "drops": [RosterMove("1")], "waiver": True}, "must name the player"),
+        ({"adds": [], "drops": [RosterMove("1")], "bid": 1}, "must name the player"),
+    ],
+)
+def test_a_transaction_espn_would_refuse_for_its_shape_is_refused_first(kwargs, fragment):
+    post = FakePost()
+    with pytest.raises(ConfigInvalidError) as caught:
+        _provider(post).move_players(*LEAGUE, "1", **kwargs)
+    assert caught.value.kind == "argument"
+    assert fragment in caught.value.message
+    assert post.calls == []
+
+
+def test_a_cancel_is_the_captured_body_and_returns_a_new_canceled_transaction():
+    post = FakePost(_captured_06_response("p5-cancel-waiver-claim"))
+    result = _provider(post).cancel_transaction(*LEAGUE, "1", "<uuid-1>")
+    assert post.body == _captured_06_request("p5-cancel-waiver-claim")
+    assert result.status == "CANCELED"
+    assert result.is_pending is False
+    assert result.provider_transaction_id == "<uuid-2>"
+    assert result.raw["relatedTransactionId"] == "<uuid-1>"
+
+
+@pytest.mark.parametrize(
+    ("capture", "provider_type", "kind"),
+    [
+        ("p3-waiver-claim-no-bid-no-drop", "TRAN_ROSTER_LIMIT_EXCEEDED_ONE", "roster_full"),
+        ("p6c-roster-drop-player-not-on-team", "TRAN_PLAYER_NOT_ON_TEAM", "already_dropped"),
+        ("p1-freeagent-add-no-drop", "TRAN_PLAYER_NOT_FREEAGENT", "unknown"),
+        ("p6d-freeagent-add-rostered-elsewhere", "TRAN_PLAYER_NOT_AVAILABLE", "unknown"),
+        ("p2-waiver-claim-no-drop-full-roster", "TRAN_ACQUISITION_BUDGET_NOT_SUPPORTED", "unknown"),
+        ("p6a-waiver-bid-1000", "TRAN_ACQUISITION_BUDGET_NOT_SUPPORTED", "unknown"),
+        ("p6b-drop-player-not-on-team", "TRAN_INVALID_ITEM_TYPE_COUNT", "unknown"),
+        ("p7a-claim-add-without-toTeamId", "TRAN_ITEM_TO_TEAM_ID_MISSING", "unknown"),
+        ("p7b-claim-drop-without-fromTeamId", "TRAN_ITEM_FROM_TEAM_ID_MISSING", "unknown"),
+    ],
+)
+def test_every_captured_add_drop_rejection_maps_to_its_kind(capture, provider_type, kind):
+    response = _captured_06_response(capture)
+    with pytest.raises(WriteRejectedError) as caught:
+        _write_outcome(
+            response.status_code,
+            response.body,
+            headers={},
+            cookies_sent=True,
+            write=_write(),
+        )
+    assert caught.value.http_status == 409
+    assert caught.value.provider_type == provider_type
+    assert caught.value.kind == kind
+    assert caught.value.remediation == response.body["messages"][0]
+
+
+def test_the_writing_fake_records_the_waiver_flag():
+    """A command that forgets ``waiver=True`` must fail a forwarding assertion."""
+    from _fake_provider import WritingFake
+
+    fake = WritingFake()
+    fake.move_players("99", 2026, "1", adds=[RosterMove("5")], drops=[], waiver=True)
+    fake.move_players("99", 2026, "1", adds=[RosterMove("5")], drops=[])
+    assert fake.calls[-2][1]["waiver"] is True
+    assert fake.calls[-1][1]["waiver"] is False

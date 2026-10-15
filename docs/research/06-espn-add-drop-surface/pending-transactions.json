@@ -1,0 +1,70 @@
+{
+  "note": "view=mPendingTransactions read while a claim was pending and after it was cancelled; only team 7's rows are kept",
+  "redactions": [
+    "league id in every URL replaced with 99, the repository's invented synthetic league (docs/testing.md section 6); the real league is a throwaway public league joined for #108",
+    "the probing member's SWID (already a salted pseudonym in the private capture) replaced with {SWID-REDACTED}, so it is not a confirmable mapping",
+    "ESPN transaction ids replaced with <uuid-N>, numbered per distinct id across every file so a cancel's relatedTransactionId still joins to the claim it withdrew",
+    "CloudFront request ids dropped",
+    "team-7 player ids, and the free agents the probing member added or claimed, replaced with a stable synthetic mapping continuing 05's (9000015 upward, D/ST -9000002), and player names inside ESPN's messages replaced with the same synthetic label; slot ids are untouched",
+    "another team's player id replaced with 0, its name with <another team's player>, and its team number with <other>; other managers' names and ids never appear"
+  ],
+  "snapshots": {
+    "after-p5-mPendingTransactions": {
+      "pending_rows_total": 0,
+      "team_7_rows": []
+    },
+    "after-p7c-mPendingTransactions": {
+      "pending_rows_total": 1,
+      "team_7_rows": [
+        {
+          "bidAmount": 0,
+          "executionType": "EXECUTE",
+          "id": "<uuid-3>",
+          "isActingAsTeamOwner": false,
+          "isLeagueManager": false,
+          "isPending": true,
+          "items": [
+            {
+              "acquisitionBudget": 0,
+              "fromLineupSlotId": -1,
+              "fromTeamId": 0,
+              "isKeeper": false,
+              "overallPickNumber": 0,
+              "playerId": 9000030,
+              "toLineupSlotId": 20,
+              "toTeamId": 7,
+              "type": "ADD"
+            },
+            {
+              "acquisitionBudget": 0,
+              "fromLineupSlotId": 20,
+              "fromTeamId": 7,
+              "isKeeper": false,
+              "overallPickNumber": 0,
+              "playerId": 9000023,
+              "toLineupSlotId": -1,
+              "toTeamId": 0,
+              "type": "DROP"
+            }
+          ],
+          "memberId": "{SWID-REDACTED}",
+          "processDate": 1792134000000,
+          "proposedDate": 1792046096566,
+          "rating": 0,
+          "scoringPeriodId": 6,
+          "status": "PENDING",
+          "teamId": 7,
+          "type": "WAIVER"
+        }
+      ]
+    },
+    "after-p7c-r-mPendingTransactions": {
+      "pending_rows_total": 0,
+      "team_7_rows": []
+    },
+    "p8-final-mPendingTransactions": {
+      "pending_rows_total": 0,
+      "team_7_rows": []
+    }
+  }
+}

@@ -334,11 +334,21 @@ _TRAN_KINDS: Final[Mapping[str, str]] = {
     "TRAN_ROSTER_SLOT_LIMIT_EXCEEDED": "slot_limit",
     "TRAN_ROSTER_SAME_SLOT": "same_slot",
     "TRAN_INVALID_SCORINGPERIOD_NOT_CURRENT": "not_current_period",
+    "TRAN_ROSTER_LIMIT_EXCEEDED_ONE": "roster_full",
+    "TRAN_PLAYER_NOT_ON_TEAM": "already_dropped",
 }
-"""ESPN's observed ``TRAN_*`` rejection types (brief §5.1) to our closed
-``WRITE_REJECTED`` vocabulary. Anything else is ``"unknown"`` with ESPN's string
-kept verbatim in ``provider_type``: reported, not lost, and mapping it later is
-not an API change."""
+"""ESPN's observed ``TRAN_*`` rejection types to our closed ``WRITE_REJECTED``
+vocabulary: the lineup reasons from brief §5.1, and the add/drop reasons from
+``06-espn-add-drop-surface.md``. Anything else is ``"unknown"`` with ESPN's
+string kept verbatim in ``provider_type``: reported, not lost, and mapping it
+later is not an API change.
+
+Observed and deliberately left ``"unknown"`` (06 §5): the availability pair
+``TRAN_PLAYER_NOT_FREEAGENT`` (on waivers; claim instead) and
+``TRAN_PLAYER_NOT_AVAILABLE`` (on another roster), which want a kind of their
+own that the vocabulary does not have yet; ``TRAN_ACQUISITION_BUDGET_NOT_SUPPORTED``
+(a bid in a league without a budget), which is not ``budget_exceeded``; and
+the three item-shape reasons, which are our bug rather than a user's."""
 
 _UNKNOWN_STATE_REMEDIATION: Final[str] = (
     "The transaction may have applied. Read `transactions` (and `claims` for a "
@@ -1510,20 +1520,50 @@ class EspnProvider:
         adds: Sequence[RosterMove],
         drops: Sequence[RosterMove],
         bid: int | None = None,
+        waiver: bool = False,
     ) -> WriteResult:
-        """``FREEAGENT`` add/drop, or a ``WAIVER`` claim when ``bid`` is given.
+        """An add, an add/drop, a standalone drop, or a waiver claim.
 
-        **The item shapes are community-attested, not captured** (brief §10;
-        ``ADD`` carries ``toTeamId``, ``DROP`` carries ``fromTeamId``,
-        ``bidAmount`` rides on ``WAIVER`` only). jwulff/fantasy-sports#108
-        captures them in a throwaway league and may amend this method; nothing
-        may use it against a real league before then.
+        The envelope follows from the arguments, as captured in a test league
+        (``docs/research/06-espn-add-drop-surface.md``):
+
+        * ``waiver=True`` or a ``bid`` -> ``WAIVER``, which returns ``200``
+          with ``status: "PENDING"`` and changes nothing until waivers
+          process. ``bidAmount`` is sent **only** when ``bid`` is given: a
+          league without an acquisition budget rejects every bid, even ``1``,
+          as ``TRAN_ACQUISITION_BUDGET_NOT_SUPPORTED``, so a claim there is
+          ``waiver=True`` with no bid.
+        * an add (with or without drops) -> ``FREEAGENT``.
+        * drops only -> ``ROSTER``. A ``FREEAGENT`` envelope must carry
+          exactly one ``ADD`` (``TRAN_INVALID_ITEM_TYPE_COUNT``).
+
+        ``ADD`` items carry ``toTeamId`` and ``DROP`` items ``fromTeamId``;
+        each is required and its absence is a typed ``409``
+        (``TRAN_ITEM_TO_TEAM_ID_MISSING`` / ``TRAN_ITEM_FROM_TEAM_ID_MISSING``).
+
+        Refused before any request, as ``CONFIG_INVALID`` (``kind:
+        "argument"``): no players at all, more than one add (ESPN refuses it
+        on ``FREEAGENT``; on ``WAIVER`` it is unverified and refused the same
+        way), a claim with nothing to add, and a negative or non-integer bid.
         """
         if not adds and not drops:
             raise ConfigInvalidError(
                 "An add/drop names no players.",
                 kind="argument",
                 remediation="Name at least one player to add or drop.",
+            )
+        if len(adds) > 1:
+            raise ConfigInvalidError(
+                f"One transaction can add one player; {len(adds)} were named.",
+                kind="argument",
+                remediation="Send one add (with its drops) per transaction.",
+            )
+        claim = bool(waiver) or bid is not None
+        if claim and not adds:
+            raise ConfigInvalidError(
+                "A waiver claim must name the player it claims.",
+                kind="argument",
+                remediation="Name one player to add; drops alone are not a claim.",
             )
         if bid is not None and (_as_int(bid) is None or int(bid) < 0):
             raise ConfigInvalidError(
@@ -1532,14 +1572,10 @@ class EspnProvider:
                 remediation="Pass a whole-dollar bid of 0 or more.",
             )
         write = self._begin_write(league_id, season, team_id)
-        # Unconfirmed shape -- see the docstring and #108.
         items = [_move_item(move, "ADD", "toTeamId", write.team_id) for move in adds]
         items += [_move_item(move, "DROP", "fromTeamId", write.team_id) for move in drops]
-        body: dict[str, Any] = {
-            "type": "FREEAGENT" if bid is None else "WAIVER",
-            "executionType": "EXECUTE",
-            "items": items,
-        }
+        kind = "WAIVER" if claim else "FREEAGENT" if adds else "ROSTER"
+        body: dict[str, Any] = {"type": kind, "executionType": "EXECUTE", "items": items}
         if bid is not None:
             body["bidAmount"] = int(bid)
         return self._post(write, body)
@@ -1547,12 +1583,15 @@ class EspnProvider:
     def cancel_transaction(
         self, league_id: str, season: int, team_id: str, transaction_id: str
     ) -> WriteResult:
-        """Withdraw a pending claim: ``executionType: "CANCEL"`` plus
-        ``relatedTransactionId``, and no items.
+        """Withdraw a pending claim: ``type: "WAIVER"``, ``executionType:
+        "CANCEL"``, ``relatedTransactionId``, and no items.
 
-        **Community shape, never sent** (brief §8 item 7). ``type`` is
-        ``WAIVER`` because the only pending transaction this tool creates is a
-        claim; #108 confirms both.
+        Captured in a test league (``06-espn-add-drop-surface.md``): ESPN
+        answers ``200`` with a **new** transaction id, ``status: "CANCELED"``,
+        the claim's items echoed, and ``relatedTransactionId`` naming the
+        claim. The claim leaves ``view=mPendingTransactions`` at once, but its
+        own ``mTransactions2`` row keeps reading ``PENDING``; the cancel row
+        pointing at it is what says it was withdrawn.
         """
         related = str(transaction_id or "").strip()
         if not related:
@@ -2466,7 +2505,10 @@ def _eligible_slot_ids(entry: Mapping[str, Any]) -> frozenset[int] | None:
 
 
 def _move_item(move: RosterMove, kind: str, team_key: str, team_id: int) -> dict[str, Any]:
-    """One ``ADD``/``DROP`` item. Community shape, unconfirmed -- see #108."""
+    """One ``ADD``/``DROP`` item: ``toTeamId`` on an add, ``fromTeamId`` on a
+    drop, both required by ESPN (``06-espn-add-drop-surface.md``). A slot is
+    optional: ESPN accepted ``toLineupSlotId`` on an add and fills a drop's
+    ``fromLineupSlotId`` itself."""
     player_id = _as_int(getattr(move, "player_id", None))
     if player_id is None:
         raise ConfigInvalidError(

@@ -14,3 +14,4 @@ architecture doc is being updated, not the brief.
 | `03-espn-api-surface.md` | ESPN v3 endpoint/view surface, auth mechanics, breakage history |
 | `04-python-cli-packaging.md` | 2026 best practice for uv-distributed typer CLIs, testing, secrets |
 | `05-espn-write-surface.md` | ESPN write host, lineup transaction shape, rejection vocabulary, credential and ownership scope — probed live against a real league (#14); captures in `05-espn-write-surface/` |
+| `06-espn-add-drop-surface.md` | ESPN add/drop/waiver/cancel item shapes and rejection vocabulary, probed in a throwaway public league during its post-draft waiver window (#108, partial); captures in `06-espn-add-drop-surface/` |

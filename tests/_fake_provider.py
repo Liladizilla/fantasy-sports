@@ -142,7 +142,9 @@ class WritingFake(_Base):
         adds: Any,
         drops: Any,
         bid: int | None = None,
+        waiver: bool = False,
     ) -> Any:
+        claim = waiver or bid is not None
         return self._write(
             "move_players",
             league_id,
@@ -151,7 +153,8 @@ class WritingFake(_Base):
             adds=list(adds),
             drops=list(drops),
             bid=bid,
-            kind="FREEAGENT" if bid is None else "WAIVER",
+            waiver=waiver,
+            kind="WAIVER" if claim else "FREEAGENT" if adds else "ROSTER",
         )
 
     def cancel_transaction(

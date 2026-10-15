@@ -1,0 +1,167 @@
+{
+ "note": "team 7 mRoster {synthetic playerId: lineupSlotId} snapshots, before the first probe and after the probes that could change the roster; keys are probe labels in the order taken",
+ "redactions": [
+  "league id in every URL replaced with 99, the repository's invented synthetic league (docs/testing.md section 6); the real league is a throwaway public league joined for #108",
+  "the probing member's SWID (already a salted pseudonym in the private capture) replaced with {SWID-REDACTED}, so it is not a confirmable mapping",
+  "ESPN transaction ids replaced with <uuid-N>, numbered per distinct id across every file so a cancel's relatedTransactionId still joins to the claim it withdrew",
+  "CloudFront request ids dropped",
+  "team-7 player ids, and the free agents the probing member added or claimed, replaced with a stable synthetic mapping continuing 05's (9000015 upward, D/ST -9000002), and player names inside ESPN's messages replaced with the same synthetic label; slot ids are untouched",
+  "another team's player id replaced with 0, its name with <another team's player>, and its team number with <other>; other managers' names and ids never appear"
+ ],
+ "snapshots": {
+  "p0": {
+   "taken_at": "2026-10-15T06:31:14+00:00",
+   "roster_size": 16,
+   "slots": {
+    "9000019": 4,
+    "9000017": 2,
+    "9000016": 2,
+    "9000018": 4,
+    "9000029": 23,
+    "9000020": 6,
+    "9000015": 0,
+    "9000024": 20,
+    "9000025": 20,
+    "9000026": 20,
+    "9000028": 20,
+    "9000027": 20,
+    "9000023": 20,
+    "9000022": 20,
+    "-9000002": 16,
+    "9000021": 17
+   }
+  },
+  "after-p2": {
+   "taken_at": "2026-10-15T06:32:26+00:00",
+   "roster_size": 16,
+   "slots": {
+    "9000019": 4,
+    "9000017": 2,
+    "9000016": 2,
+    "9000018": 4,
+    "9000029": 23,
+    "9000020": 6,
+    "9000015": 0,
+    "9000024": 20,
+    "9000025": 20,
+    "9000026": 20,
+    "9000028": 20,
+    "9000027": 20,
+    "9000023": 20,
+    "9000022": 20,
+    "-9000002": 16,
+    "9000021": 17
+   }
+  },
+  "after-p3": {
+   "taken_at": "2026-10-15T06:32:40+00:00",
+   "roster_size": 16,
+   "slots": {
+    "9000019": 4,
+    "9000017": 2,
+    "9000016": 2,
+    "9000018": 4,
+    "9000029": 23,
+    "9000020": 6,
+    "9000015": 0,
+    "9000024": 20,
+    "9000025": 20,
+    "9000026": 20,
+    "9000028": 20,
+    "9000027": 20,
+    "9000023": 20,
+    "9000022": 20,
+    "-9000002": 16,
+    "9000021": 17
+   }
+  },
+  "after-p4": {
+   "taken_at": "2026-10-15T06:32:54+00:00",
+   "roster_size": 16,
+   "slots": {
+    "9000019": 4,
+    "9000017": 2,
+    "9000016": 2,
+    "9000018": 4,
+    "9000029": 23,
+    "9000020": 6,
+    "9000015": 0,
+    "9000024": 20,
+    "9000025": 20,
+    "9000026": 20,
+    "9000028": 20,
+    "9000027": 20,
+    "9000023": 20,
+    "9000022": 20,
+    "-9000002": 16,
+    "9000021": 17
+   }
+  },
+  "after-p5": {
+   "taken_at": "2026-10-15T06:33:06+00:00",
+   "roster_size": 16,
+   "slots": {
+    "9000019": 4,
+    "9000017": 2,
+    "9000016": 2,
+    "9000018": 4,
+    "9000029": 23,
+    "9000020": 6,
+    "9000015": 0,
+    "9000024": 20,
+    "9000025": 20,
+    "9000026": 20,
+    "9000028": 20,
+    "9000027": 20,
+    "9000023": 20,
+    "9000022": 20,
+    "-9000002": 16,
+    "9000021": 17
+   }
+  },
+  "after-p5-30s": {
+   "taken_at": "2026-10-15T06:33:46+00:00",
+   "roster_size": 16,
+   "slots": {
+    "9000019": 4,
+    "9000017": 2,
+    "9000016": 2,
+    "9000018": 4,
+    "9000029": 23,
+    "9000020": 6,
+    "9000015": 0,
+    "9000024": 20,
+    "9000025": 20,
+    "9000026": 20,
+    "9000028": 20,
+    "9000027": 20,
+    "9000023": 20,
+    "9000022": 20,
+    "-9000002": 16,
+    "9000021": 17
+   }
+  },
+  "p8-final": {
+   "taken_at": "2026-10-15T06:39:57+00:00",
+   "roster_size": 16,
+   "slots": {
+    "9000019": 4,
+    "9000017": 2,
+    "9000016": 2,
+    "9000018": 4,
+    "9000029": 23,
+    "9000020": 6,
+    "9000015": 0,
+    "9000024": 20,
+    "9000025": 20,
+    "9000026": 20,
+    "9000028": 20,
+    "9000027": 20,
+    "9000023": 20,
+    "9000022": 20,
+    "-9000002": 16,
+    "9000021": 17
+   }
+  }
+ }
+}

@@ -1,0 +1,115 @@
+{
+  "name": "p7c-claim-add-with-toLineupSlotId-20",
+  "note": "Shape variation on a pending WAIVER claim: ADD item carrying toLineupSlotId 20 (the provider's shape when to_slot=BE). Cancelled on the next request.",
+  "redactions": [
+    "league id in every URL replaced with 99, the repository's invented synthetic league (docs/testing.md section 6); the real league is a throwaway public league joined for #108",
+    "the probing member's SWID (already a salted pseudonym in the private capture) replaced with {SWID-REDACTED}, so it is not a confirmable mapping",
+    "ESPN transaction ids replaced with <uuid-N>, numbered per distinct id across every file so a cancel's relatedTransactionId still joins to the claim it withdrew",
+    "CloudFront request ids dropped",
+    "team-7 player ids, and the free agents the probing member added or claimed, replaced with a stable synthetic mapping continuing 05's (9000015 upward, D/ST -9000002), and player names inside ESPN's messages replaced with the same synthetic label; slot ids are untouched",
+    "another team's player id replaced with 0, its name with <another team's player>, and its team number with <other>; other managers' names and ids never appear"
+  ],
+  "captured_at": "2026-10-15T06:34:56+00:00",
+  "request": {
+    "method": "POST",
+    "url": "https://lm-api-writes.fantasy.espn.com/apis/v3/games/ffl/seasons/2026/segments/0/leagues/99/transactions/",
+    "headers": {
+      "User-Agent": "python-requests/2.34.2",
+      "Accept-Encoding": "gzip, deflate",
+      "Accept": "*/*",
+      "Connection": "keep-alive",
+      "Content-Type": "application/json",
+      "x-fantasy-source": "kona",
+      "x-fantasy-platform": "kona-PROD",
+      "Cookie": "<redacted>",
+      "Content-Length": "247"
+    },
+    "cookies_sent": [
+      "espn_s2"
+    ],
+    "body": {
+      "isLeagueManager": false,
+      "teamId": 7,
+      "type": "WAIVER",
+      "scoringPeriodId": 6,
+      "executionType": "EXECUTE",
+      "items": [
+        {
+          "playerId": 9000030,
+          "type": "ADD",
+          "toTeamId": 7,
+          "toLineupSlotId": 20
+        },
+        {
+          "playerId": 9000023,
+          "type": "DROP",
+          "fromTeamId": 7
+        }
+      ]
+    }
+  },
+  "response": {
+    "status": 200,
+    "headers": {
+      "Content-Type": "application/json;charset=utf-8",
+      "Transfer-Encoding": "chunked",
+      "Connection": "keep-alive",
+      "Date": "Thu, 15 Oct 2026 06:34:56 GMT",
+      "X-Frame-Options": "DENY",
+      "Content-Encoding": "gzip",
+      "X-Fantasy-Server-Time": "Thu, 15 Oct 2026 06:34:56 GMT",
+      "X-Fantasy-Role": "NONE",
+      "Cache-Control": "must-revalidate",
+      "Pragma": "no-cache",
+      "Expires": "-1",
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET,PUT,POST,DELETE,OPTIONS,HEAD",
+      "Access-Control-Allow-Credentials": "true",
+      "Vary": "origin,accept-encoding",
+      "Access-Control-Expose-Headers": "location,content-length,etag,if-none-match,X-Fantasy-Filter-Player-Count,X-Fantasy-Filter-Communication-Count,X-Fantasy-Filter-Schedule-Count,X-Fantasy-Filter-Transaction-Count,X-Fantasy-Role,X-Fantasy-Last-Update-League,X-Fantasy-Server-Time,X-Fantasy-Filter-TopicType-NOTE-Count,X-Fantasy-Filter-TopicType-POLL-Count,X-Fantasy-Filter-TopicType-MSG_BOARD-Count,X-Fantasy-Filter-TopicType-CHAT-Count,X-Fantasy-Filter-TopicType-EMAIL-Count,X-Fantasy-Filter-TopicType-OTHER-Count,X-Fantasy-Filter-TopicType-ACTIVITY_TRANSACTIONS-Count,X-Fantasy-Filter-TopicType-ACTIVITY_SETTINGS-Count,X-Fantasy-Filter-TopicType-ACTIVITY_STATUS-Count,X-Fantasy-Filter-TopicType-ACTIVITY_SCHEDULE-Count,X-Fantasy-Filter-TopicType-MSG_BOARD_GROUP-Count,X-Fantasy-Filter-TopicType-MSG_BOARD_MATCHUP-Count,X-Fantasy-Filter-TopicType-REMINDER_ACTIVATE-Count,X-Fantasy-Filter-TopicType-REMINDER_SCHEDULE-Count,X-Fantasy-Filter-TopicType-CHAT_ALL_MEMBERS-Count,X-Fantasy-Filter-TopicType-CHAT_DIRECT_MESSAGE-Count,Polling-Interval",
+      "X-Content-Type-Options": "nosniff",
+      "X-XSS-Protection": "0",
+      "X-Cache": "Miss from cloudfront"
+    },
+    "body": {
+      "bidAmount": 0,
+      "executionType": "EXECUTE",
+      "id": "<uuid-3>",
+      "isActingAsTeamOwner": false,
+      "isLeagueManager": false,
+      "isPending": true,
+      "items": [
+        {
+          "fromLineupSlotId": -1,
+          "fromTeamId": 0,
+          "isKeeper": false,
+          "overallPickNumber": 0,
+          "playerId": 9000030,
+          "toLineupSlotId": 20,
+          "toTeamId": 7,
+          "type": "ADD"
+        },
+        {
+          "fromLineupSlotId": 20,
+          "fromTeamId": 7,
+          "isKeeper": false,
+          "overallPickNumber": 0,
+          "playerId": 9000023,
+          "toLineupSlotId": -1,
+          "toTeamId": 0,
+          "type": "DROP"
+        }
+      ],
+      "memberId": "{SWID-REDACTED}",
+      "proposedDate": 1792046096566,
+      "rating": 0,
+      "scoringPeriodId": 6,
+      "skipTransactionCounters": false,
+      "status": "PENDING",
+      "subOrder": 1,
+      "teamId": 7,
+      "type": "WAIVER"
+    },
+    "elapsed_ms": 76
+  }
+}

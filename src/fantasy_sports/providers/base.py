@@ -270,8 +270,11 @@ class WritingProvider(Protocol):
         adds: Sequence[RosterMove],
         drops: Sequence[RosterMove],
         bid: int | None = None,
+        waiver: bool = False,
     ) -> WriteResult:
-        """Add and/or drop players. ``bid`` makes it a waiver claim.
+        """Add and/or drop players. ``waiver=True`` or a ``bid`` makes it a
+        waiver claim; ``bid`` is only sent when given, because a league
+        without an acquisition budget rejects every bid.
 
         Irreversible once processed. The caller -- not the provider -- owns
         the acknowledgement gate in front of this.
