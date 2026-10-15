@@ -188,7 +188,7 @@ def claim_player(
     ``TRAN_ACQUISITION_BUDGET_NOT_SUPPORTED``, so no ``bidAmount`` is sent.
     ``data`` has the same keys as :func:`add_player`, with ``kind``
     ``"claim"``; ``is_pending`` is true and ``provider_transaction_id`` is the
-    id a later ``claim cancel`` takes.
+    id a later ``cancel-claim`` takes.
     """
     del fresh
     command = _argv("claim", team=team, player=player, drop=drop, bid=bid)
@@ -412,6 +412,7 @@ def plan_move(
     drop: str | None,
     slot: str | None,
     bid: int | None,
+    acquisition: Mapping[str, Any] | None = None,
 ) -> MovePlan:
     """Resolve the players and refuse, by name, what ESPN would refuse.
 
@@ -435,7 +436,12 @@ def plan_move(
             raise _argument(
                 f"{added_label} is on waivers, so it cannot be added outright.",
                 "Submit a waiver claim instead: `fantasy-sports claim --team ... --player "
-                f"{added_id} --bid N`.",
+                f"{added_id}`"
+                + (
+                    " with `--bid N` if this league uses an acquisition budget."
+                    if (acquisition or {}).get("uses_budget") is True
+                    else "."
+                ),
                 details={"player_id": added_id, "pool_status": status},
             )
         if kind == "claim" and status == _POOL_FREE_AGENT:
@@ -528,8 +534,17 @@ def execute_move(
     provider = ctx.provider
     role = provider.session_role(*ctx.target)
     require_owned(role, team_id)
-    plan = plan_move(kind, roster=roster, pool=pool, player=player, drop=drop, slot=slot, bid=bid)
     acquisition = dict(acquisition or {"acquisition_type": None, "uses_budget": None})
+    plan = plan_move(
+        kind,
+        roster=roster,
+        pool=pool,
+        player=player,
+        drop=drop,
+        slot=slot,
+        bid=bid,
+        acquisition=acquisition,
+    )
     if kind == "claim" and plan.bid is not None and acquisition.get("uses_budget") is False:
         # ESPN rejects every bid in such a league, even 1, as
         # TRAN_ACQUISITION_BUDGET_NOT_SUPPORTED (brief 06). Refused here, so

@@ -1085,6 +1085,35 @@ def test_the_statement_for_each_kind():
     assert both.startswith("B (2) joins the roster") and both.endswith("cannot be reversed.")
 
 
+@pytest.mark.parametrize(
+    ("uses_budget", "mentions_bid"),
+    [(True, True), (False, False), (None, False)],
+)
+def test_waiver_add_hint_only_recommends_bid_when_budget_is_supported(uses_budget, mentions_bid):
+    from types import SimpleNamespace
+
+    from fantasy_sports.commands.moves import plan_move
+
+    agent = SimpleNamespace(
+        provider_id="9",
+        player=SimpleNamespace(name="Nine", provider_id="9", eligible_slots=()),
+        raw={"status": "WAIVERS"},
+    )
+    with pytest.raises(ConfigInvalidError) as caught:
+        plan_move(
+            "add",
+            roster=[],
+            pool=[agent],
+            player="9",
+            drop=None,
+            slot=None,
+            bid=None,
+            acquisition={"uses_budget": uses_budget},
+        )
+    assert "fantasy-sports claim" in caught.value.remediation
+    assert ("--bid N" in caught.value.remediation) is mentions_bid
+
+
 def test_a_pool_entry_without_a_status_is_not_refused_on_its_account():
     from types import SimpleNamespace
 
