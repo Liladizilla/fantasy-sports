@@ -41,12 +41,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import MISSING, dataclass, field, fields
 from datetime import datetime
-from typing import Any, ClassVar, Final, Self
+from typing import Any, ClassVar, Final, Literal, Self
 
 from fantasy_sports.core.errors import SchemaDriftError
 
 __all__ = [
     "NORMALIZED_MODELS",
+    "SESSION_ROLES",
     "TRANSACTION_TYPES",
     "CredentialSpec",
     "FreeAgent",
@@ -57,9 +58,12 @@ __all__ = [
     "Matchup",
     "Player",
     "ProviderObject",
+    "RosterMove",
     "RosterSlot",
+    "SessionRole",
     "Team",
     "Transaction",
+    "WriteResult",
 ]
 
 #: The narrowed, lossy, honest transaction vocabulary (research §4). ESPN's
@@ -524,6 +528,105 @@ class CredentialSpec:
     secret: bool = True
     required: bool = True
     staleness: str | None = None
+
+
+# --------------------------------------------------------------------------- #
+# The write surface (jwulff/fantasy-sports#107)
+# --------------------------------------------------------------------------- #
+
+SESSION_ROLES: Final[tuple[str, ...]] = ("creator", "manager", "member")
+"""What the session's member is in one league, most privileged first.
+
+``creator`` is ESPN's ``isLeagueCreator``, the founding commissioner;
+``manager`` is ``isLeagueManager``, a *granted* league manager. ESPN does not
+mirror the first into the second, so a check reading only ``isLeagueManager``
+reports the real commissioner as a plain member
+(``docs/memory/commissioner-authority-is-two-flags-in-mnav.md``).
+"""
+
+
+@dataclass(frozen=True)
+class SessionRole(ProviderObject):
+    """Who the configured credentials act as in one league, and which teams
+    they own.
+
+    The role is recorded, never used to widen what a write may touch: the
+    ownership guard refuses any team outside :attr:`owned_team_ids`
+    regardless of role, because a commissioner's cookie is honoured by ESPN on
+    another manager's team and a ``--team`` typo would be applied
+    (``docs/memory/espn-lineup-write-authority-is-broader-than-team-ownership.md``).
+    """
+
+    _SEQUENCES: ClassVar[frozenset[str]] = frozenset({"owned_team_ids"})
+
+    provider: str
+    member_id: str | None
+    """The session's member id **as this tool reports member ids** -- for
+    ESPN, the SWID's pseudonym, never the SWID itself. ``None`` when it could
+    not be determined, in which case :attr:`owned_team_ids` is empty and every
+    write is refused."""
+    role: Literal["creator", "manager", "member"]
+    owned_team_ids: tuple[str, ...]
+    """Team ids whose owners include :attr:`member_id`. Plural: ESPN records a
+    co-manager as a second entry in ``owners``."""
+    raw: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.role not in SESSION_ROLES:
+            raise ValueError(f"unknown session role {self.role!r}; expected one of {SESSION_ROLES}")
+
+
+@dataclass(frozen=True)
+class RosterMove:
+    """One player entering or leaving a roster, as a caller asks for it.
+
+    An *input* to a write, not something a provider returned, so it carries no
+    ``provider`` or ``raw`` and is not a :class:`ProviderObject`. Slots are
+    slot **names** in the provider's own vocabulary (``"BE"``, ``"RB/WR/TE"``);
+    the adapter maps them to whatever its API wants. ``None`` means "let the
+    provider choose", which for an add is the bench.
+    """
+
+    player_id: str
+    from_slot: str | None = None
+    to_slot: str | None = None
+
+
+@dataclass(frozen=True)
+class WriteResult(ProviderObject):
+    """What the provider said when it accepted a write.
+
+    Not in :data:`NORMALIZED_MODELS`: it describes a transaction this tool
+    *sent*, not a league object it read, and it has no ``provider_id`` of a
+    league entity -- :attr:`provider_transaction_id` is the join key into the
+    provider's own transaction log.
+    """
+
+    _SEQUENCES: ClassVar[frozenset[str]] = frozenset({"items"})
+
+    provider: str
+    provider_transaction_id: str
+    """ESPN's transaction UUID, the key ``mTransactions2`` files it under."""
+    status: str
+    """The provider's own status string, verbatim (``"EXECUTED"``, ...)."""
+    is_pending: bool
+    """``True`` for a queued claim that has not processed yet."""
+    team_id: str
+    items: tuple[Mapping[str, Any], ...]
+    """The provider's own item list, as it echoed it."""
+    credentials: Mapping[str, Any]
+    """``{"espn_s2_age_seconds": int | None, "warning": str | None}``, computed
+    before the request was sent (R12a), so an agent learns its cookie is old
+    from a success rather than from the 401 that eventually follows."""
+    raw: Mapping[str, Any]
+    proposed_at: datetime | None = None
+    """UTC, re-derived from the provider's epoch value; never naive."""
+    bid_amount: int | None = None
+    member_id: str | None = None
+    """The member the provider attributed the write to, as it echoed it --
+    the pseudonym, never the SWID. The journal attributes to this, not to an
+    id we sent (we send none)."""
 
 
 #: Every normalized provider object. ``CredentialSpec`` is deliberately absent:

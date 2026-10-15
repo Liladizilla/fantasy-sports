@@ -205,6 +205,30 @@ def test_credentials_check_warns_when_a_stored_credential_is_stale(
     assert "stale" in checks["credentials"]["summary"]
 
 
+def test_credentials_check_warns_when_the_two_cookies_come_from_different_links(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """espn_s2 authenticates a write; swid decides ownership. Two links may mean
+    two accounts (#107). Static, no network."""
+    from fantasy_sports.auth import chain as auth_chain
+
+    monkeypatch.delenv("FANTASY_SPORTS_SWID", raising=False)
+    monkeypatch.setattr(
+        auth_chain,
+        "read_from_keychain",
+        lambda spec: {"swid": "{1A2B3C4D-5E6F-4A8B-9C0D-1E2F3A4B5C6D}"}.get(spec.name),
+    )
+    checks = _by_name(doctor())
+    assert checks["credentials"]["status"] == "warn"
+    assert "different ESPN accounts" in checks["credentials"]["summary"]
+    assert checks["credentials"]["details"]["sources_match"] is False
+
+
+def test_credentials_from_one_link_report_sources_matching():
+    checks = _by_name(doctor())
+    assert checks["credentials"]["details"]["sources_match"] is True
+
+
 def test_credentials_check_never_carries_a_credential_value():
     import json as _json
 

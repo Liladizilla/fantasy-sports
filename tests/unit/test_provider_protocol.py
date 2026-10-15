@@ -29,7 +29,12 @@ from fantasy_sports.core.models import (
     Team,
     Transaction,
 )
-from fantasy_sports.providers.base import PROVIDER_METHODS, Provider
+from fantasy_sports.providers.base import (
+    PROVIDER_METHODS,
+    WRITING_PROVIDER_METHODS,
+    Provider,
+    WritingProvider,
+)
 
 
 class _StubProvider:
@@ -338,6 +343,26 @@ def test_the_protocol_surface_is_exactly_what_issue_3_requires():
     )
     for method in PROVIDER_METHODS:
         assert callable(getattr(Provider, method))
+
+
+def test_the_writing_protocol_surface_is_exactly_what_issue_107_requires():
+    """A second Protocol, so `Provider` is unchanged and a read-only adapter
+    still conforms. Pinned like `PROVIDER_METHODS`."""
+    assert WRITING_PROVIDER_METHODS == (
+        "session_role",
+        "set_lineup",
+        "move_players",
+        "cancel_transaction",
+    )
+    for method in WRITING_PROVIDER_METHODS:
+        assert callable(getattr(WritingProvider, method))
+        assert not hasattr(Provider, method)
+
+
+@pytest.mark.parametrize("cls", STUBS, ids=lambda c: c.__name__)
+def test_a_read_only_adapter_is_a_provider_and_not_a_writing_provider(cls):
+    assert isinstance(cls(), Provider)
+    assert not isinstance(cls(), WritingProvider)
 
 
 def test_issubclass_is_unavailable_because_the_protocol_has_a_data_member():

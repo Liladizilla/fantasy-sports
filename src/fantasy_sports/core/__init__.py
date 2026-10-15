@@ -26,6 +26,7 @@ from fantasy_sports.core.errors import (
 )
 from fantasy_sports.core.models import (
     NORMALIZED_MODELS,
+    SESSION_ROLES,
     TRANSACTION_TYPES,
     BoxScore,
     CredentialSpec,
@@ -35,14 +36,18 @@ from fantasy_sports.core.models import (
     Matchup,
     Player,
     ProviderObject,
+    RosterMove,
     RosterSlot,
+    SessionRole,
     Team,
     Transaction,
+    WriteResult,
 )
 
 __all__ = [
     "ERROR_TYPES",
     "NORMALIZED_MODELS",
+    "SESSION_ROLES",
     "TRANSACTION_TYPES",
     "WRITE_REJECTED_KINDS",
     "AuthExpiredError",
@@ -61,10 +66,13 @@ __all__ = [
     "ProviderObject",
     "ProviderUnavailableError",
     "RateLimitedError",
+    "RosterMove",
     "RosterSlot",
     "SchemaDriftError",
+    "SessionRole",
     "Team",
     "Transaction",
+    "WriteResult",
     "WriteDivergedError",
     "WriteRejectedError",
     "error_type_for",

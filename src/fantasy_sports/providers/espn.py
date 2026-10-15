@@ -112,12 +112,15 @@ from fantasy_sports.cache.tags import TTL_SECONDS, RequestContext, Resource, tag
 from fantasy_sports.core.errors import (
     AuthExpiredError,
     AuthMissingError,
+    ConfigInvalidError,
     FantasySportsError,
     LeagueNotFoundError,
     NotAvailableError,
     ProviderUnavailableError,
     RateLimitedError,
     SchemaDriftError,
+    WriteDivergedError,
+    WriteRejectedError,
 )
 from fantasy_sports.core.models import (
     BoxScore,
@@ -127,11 +130,20 @@ from fantasy_sports.core.models import (
     LineupEntry,
     Matchup,
     Player,
+    RosterMove,
     RosterSlot,
+    SessionRole,
     Team,
     Transaction,
+    WriteResult,
 )
-from fantasy_sports.core.redaction import remember_secret, scrub_credential_patterns
+from fantasy_sports.core.redaction import (
+    CASSETTE_SWID_SALT,
+    remember_secret,
+    scrub_body,
+    scrub_credential_patterns,
+    swid_pseudonym,
+)
 from fantasy_sports.output.envelope import (
     DataSource,
     from_epoch_millis,
@@ -140,12 +152,16 @@ from fantasy_sports.output.envelope import (
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from pathlib import Path
+
     from fantasy_sports.cache.store import CacheMode, CacheStore
 
 __all__ = [
     "AUTH_REASONS",
     "PROVIDER",
     "STARTER_EXCLUDED_SLOTS",
+    "WRITE_TIMEOUT_SECONDS",
+    "WRITE_URL",
     "EspnProvider",
     "FetchRecord",
     "RawResponse",
@@ -260,6 +276,9 @@ _VIEW_RESOURCES: Final[dict[str, Resource]] = {
     "mTeam": Resource.LEAGUE_SETTINGS,
     "mSettings": Resource.LEAGUE_SETTINGS,
     "mDraftDetail": Resource.LEAGUE_SETTINGS,
+    # Who the session is and which teams it owns. Changes when the commissioner
+    # grants LM powers or a team changes hands -- a settings-rate event.
+    "mNav": Resource.LEAGUE_SETTINGS,
     "mRoster": Resource.ROSTER,
     "mMatchup": Resource.MATCHUPS,
     "mMatchupScore": Resource.MATCHUPS,
@@ -283,6 +302,53 @@ one league's copy on a write to another or lose the cross-league hit entirely.
 """
 
 _SEASON_SCOPED_VIEWS: Final[frozenset[str]] = frozenset({"players_wl", "proTeamSchedules_wl"})
+
+WRITE_URL: Final[str] = (
+    "https://lm-api-writes.fantasy.espn.com/apis/v3/games/ffl/seasons/{season}"
+    "/segments/0/leagues/{league_id}/transactions/"
+)
+"""The write host (brief §1.1). Same path family as reads, different host, and
+the trailing slash the web client sends."""
+
+WRITE_TIMEOUT_SECONDS: Final[float] = 15.0
+"""How long one write may take before its outcome is declared unknown.
+
+Every write probed answered in 70-110 ms server-side (brief §2.4), so 15 s is
+over a hundred times the observed latency: long enough that a slow-but-healthy
+response is not cut off, because a timeout is the expensive outcome here -- it
+leaves the transaction in an unknown state that the caller must resolve by
+reading. Short enough that an agent writing against a kickoff deadline is not
+hung for a minute. Never retried (brief §8 item 1)."""
+
+_WRITE_HEADERS: Final[Mapping[str, str]] = {
+    "Content-Type": "application/json",
+    "x-fantasy-source": "kona",
+    "x-fantasy-platform": "kona-PROD",
+}
+"""What the web client sends. The two ``x-fantasy-*`` headers are optional
+(brief §2.2, p4/p15r); they are kept so the request is indistinguishable from
+the web client's, and their absence is never a debugging lead."""
+
+_TRAN_KINDS: Final[Mapping[str, str]] = {
+    "TRAN_LINEUP_LOCKED": "roster_lock",
+    "TRAN_ROSTER_SLOT_LIMIT_EXCEEDED": "slot_limit",
+    "TRAN_ROSTER_SAME_SLOT": "same_slot",
+    "TRAN_INVALID_SCORINGPERIOD_NOT_CURRENT": "not_current_period",
+}
+"""ESPN's observed ``TRAN_*`` rejection types (brief §5.1) to our closed
+``WRITE_REJECTED`` vocabulary. Anything else is ``"unknown"`` with ESPN's string
+kept verbatim in ``provider_type``: reported, not lost, and mapping it later is
+not an API change."""
+
+_UNKNOWN_STATE_REMEDIATION: Final[str] = (
+    "The transaction may have applied. Read `transactions` (and `claims` for a "
+    "waiver) before retrying; a blind retry of a claim can spend the bid twice."
+)
+
+_BENCH_SLOT_IDS: Final[frozenset[int]] = frozenset({20, 21})
+"""``BE`` and ``IR``: moves *into* these are emitted first, so a transaction
+reads vacate-then-fill in the journal (brief §3; ESPN itself validates the
+final state and does not care)."""
 
 
 # --------------------------------------------------------------------------- #
@@ -462,6 +528,9 @@ class _Transport:
         self._league_id = league_id
         self._store = store
         self._mode = mode
+        self._call_mode: CacheMode | None = None
+        """A mode for the requests inside :meth:`mode_for_call`, overriding
+        :attr:`_mode` without changing what the provider was configured with."""
         self._http = http
         self._now = now
         self._on_auth_reason = on_auth_reason
@@ -626,12 +695,13 @@ class _Transport:
 
         from fantasy_sports.cache.store import CachingFetcher
 
+        mode = self._call_mode if self._call_mode is not None else self._mode
         fetcher = CachingFetcher(
             lambda fetch_url, fetch_params: self._live(
                 fetch_url, fetch_params, headers, extend=extend, view=view
             ),
             self._store,
-            **({} if self._mode is None else {"mode": self._mode}),
+            **({} if mode is None else {"mode": mode}),
         )
         result = fetcher.fetch(
             url,
@@ -645,6 +715,21 @@ class _Transport:
             else None
         )
         return result.body, result.cached, result.stored, fetched_at
+
+    @contextmanager
+    def mode_for_call(self, mode: CacheMode) -> Iterator[None]:
+        """Use ``mode`` for the requests made inside this block, then restore.
+
+        Per call, not per provider: the write path needs one guaranteed-live
+        read (the roster it diffs against) without turning every other read
+        on the instance into a bypass. The store still scrubs the body.
+        """
+        previous = self._call_mode
+        self._call_mode = mode
+        try:
+            yield
+        finally:
+            self._call_mode = previous
 
     def _context(self, view: str, params: Mapping[str, Any] | None) -> RequestContext:
         """What the cache needs to know about this request.
@@ -938,9 +1023,15 @@ class EspnProvider:
         cache: CacheStore | None = None,
         cache_mode: CacheMode | None = None,
         http: Callable[..., Any] | None = None,
+        http_post: Callable[..., Any] | None = None,
         now: Callable[[], datetime] = utc_now,
         free_agent_limit: int = 50,
+        auth_state_path: Path | None = None,
     ) -> None:
+        # Kept unrevealed, only so the write path can report credential age
+        # (R12a); `build_auth_status` needs the chain's own record of where each
+        # value came from. A plain mapping has no such record.
+        self._credential_set = credentials if _is_credential_set(credentials) else None
         self._credentials = _revealed(credentials)
         for value in self._credentials.values():
             # Register with the scrubber so that if `espn-api` interpolates a
@@ -951,8 +1042,17 @@ class EspnProvider:
         self._cache = cache
         self._cache_mode = cache_mode
         self._http = http
+        # Resolved at call time, never bound as a default: a module-level
+        # default captured here would defeat a monkeypatch of `requests.post`
+        # (docs/memory/default-args-defeat-monkeypatch.md).
+        self._http_post = http_post
+        self._auth_state_path = auth_state_path
         self._now = now
         self._free_agent_limit = free_agent_limit
+        self._echoed_members: dict[tuple[str, int], str] = {}
+        self._identity_mismatches: dict[tuple[str, int], tuple[str, str]] = {}
+        """(league, season) -> (expected, observed) member pseudonyms, once a
+        write proved the SWID and espn_s2 are different accounts."""
         self._leagues: dict[tuple[str, int], tuple[Any, _Transport]] = {}
         self._auth_reason: str | None = None
         self.last_fetch: FetchRecord | None = None
@@ -1344,6 +1444,485 @@ class EspnProvider:
                 payload = request.league_get(params=params, headers=headers)
             self.last_fetch = FetchRecord(responses=dict(transport.responses))
             return payload if isinstance(payload, dict) else {"data": payload}
+
+    # --- writes (jwulff/fantasy-sports#107) -------------------------------- #
+
+    def session_role(self, league_id: str, season: int) -> SessionRole:
+        """Who these credentials act as in this league, from ``view=mNav``.
+
+        ``mNav``, not ``mLeagueManager``: the founding commissioner carries
+        ``isLeagueCreator`` and **not** ``isLeagueManager``, and
+        ``mLeagueManager`` shows only the second
+        (``docs/memory/commissioner-authority-is-two-flags-in-mnav.md``).
+
+        The session's member is identified by the SWID credential, compared
+        case-insensitively as a GUID *and* as this store's pseudonym of it --
+        a command's reads go through the cache, which pseudonymises every SWID
+        in a body before the adapter parses it, so ``members[].id`` and
+        ``teams[].owners`` are pseudonyms there and raw GUIDs only on a
+        store-less path. ``member_id`` is reported as the pseudonym either way,
+        so the SWID never reaches output.
+
+        Without a SWID, the member id is the one a write response in this
+        process echoed, if any; otherwise it is ``None``, ownership is empty,
+        and the guard refuses every write. In practice that means a SWID is
+        required to write at all: refuse-closed has no first write to learn
+        from.
+        """
+        with self._read(league_id, season, "session_role") as league:
+            nav = league.espn_request.league_get(params={"view": "mNav"})
+            bootstrap = self._bootstrap_payload(league_id, season)
+            return self._role_from(nav, bootstrap, key=(str(league_id), int(season)))
+
+    def set_lineup(
+        self, league_id: str, season: int, team_id: str, target: Mapping[str, str]
+    ) -> WriteResult:
+        """One ``ROSTER`` transaction moving players to the slots ``target`` names.
+
+        ``target`` maps player id to slot *name* (``"BE"``, ``"RB/WR/TE"``).
+        The current roster is read, only the players whose slot changes become
+        ``LINEUP`` items, and they go in **one** POST, which ESPN validates and
+        applies atomically (brief §3) -- per-slot requests would create the
+        half-applied lineup a single transaction cannot.
+
+        Refused before any request, as ``CONFIG_INVALID`` (``kind:
+        "argument"``): a slot name ESPN has no id for, a player not on this
+        roster, a slot not in the player's ``eligibleSlots``, and an empty diff
+        (there is no no-op transaction; ESPN rejects a from==to item as
+        ``TRAN_ROSTER_SAME_SLOT`` and takes the whole transaction with it).
+        Lock state and slot counts are left to the ``lineup set`` preflight
+        (#15) and to ESPN: lock state read from a cached roster can be stale,
+        and ESPN's own answer to both is typed.
+        """
+        write = self._begin_write(league_id, season, team_id)
+        items = self._lineup_items(write, target)
+        return self._post(write, {"type": "ROSTER", "executionType": "EXECUTE", "items": items})
+
+    def move_players(
+        self,
+        league_id: str,
+        season: int,
+        team_id: str,
+        *,
+        adds: Sequence[RosterMove],
+        drops: Sequence[RosterMove],
+        bid: int | None = None,
+    ) -> WriteResult:
+        """``FREEAGENT`` add/drop, or a ``WAIVER`` claim when ``bid`` is given.
+
+        **The item shapes are community-attested, not captured** (brief §10;
+        ``ADD`` carries ``toTeamId``, ``DROP`` carries ``fromTeamId``,
+        ``bidAmount`` rides on ``WAIVER`` only). jwulff/fantasy-sports#108
+        captures them in a throwaway league and may amend this method; nothing
+        may use it against a real league before then.
+        """
+        if not adds and not drops:
+            raise ConfigInvalidError(
+                "An add/drop names no players.",
+                kind="argument",
+                remediation="Name at least one player to add or drop.",
+            )
+        if bid is not None and (_as_int(bid) is None or int(bid) < 0):
+            raise ConfigInvalidError(
+                f"A waiver bid must be a non-negative integer; got {bid!r}.",
+                kind="argument",
+                remediation="Pass a whole-dollar bid of 0 or more.",
+            )
+        write = self._begin_write(league_id, season, team_id)
+        # Unconfirmed shape -- see the docstring and #108.
+        items = [_move_item(move, "ADD", "toTeamId", write.team_id) for move in adds]
+        items += [_move_item(move, "DROP", "fromTeamId", write.team_id) for move in drops]
+        body: dict[str, Any] = {
+            "type": "FREEAGENT" if bid is None else "WAIVER",
+            "executionType": "EXECUTE",
+            "items": items,
+        }
+        if bid is not None:
+            body["bidAmount"] = int(bid)
+        return self._post(write, body)
+
+    def cancel_transaction(
+        self, league_id: str, season: int, team_id: str, transaction_id: str
+    ) -> WriteResult:
+        """Withdraw a pending claim: ``executionType: "CANCEL"`` plus
+        ``relatedTransactionId``, and no items.
+
+        **Community shape, never sent** (brief §8 item 7). ``type`` is
+        ``WAIVER`` because the only pending transaction this tool creates is a
+        claim; #108 confirms both.
+        """
+        related = str(transaction_id or "").strip()
+        if not related:
+            raise ConfigInvalidError(
+                "A cancel needs the transaction id it withdraws.",
+                kind="argument",
+                remediation="Pass the provider_transaction_id the claim returned.",
+            )
+        write = self._begin_write(league_id, season, team_id)
+        return self._post(
+            write,
+            {"type": "WAIVER", "executionType": "CANCEL", "relatedTransactionId": related},
+        )
+
+    def credential_report(self) -> dict[str, Any]:
+        """``{"espn_s2_age_seconds", "warning"}`` -- the R12a block every write
+        result carries. Public so a ``--dry-run`` can show it without writing."""
+        return _credentials_block(
+            self._credential_set, state_path=self._auth_state_path, now=self._now()
+        )
+
+    # --- write plumbing ---------------------------------------------------- #
+
+    def _begin_write(self, league_id: str, season: int, team_id: str) -> _Write:
+        """Everything a write needs, in the order that keeps it safe.
+
+        1. ``espn_s2`` present, or ``AUTH_MISSING`` -- nothing to send.
+        2. The credential-age block, computed now so it never depends on the
+           request having been sent.
+        3. The ownership guard, before any body exists.
+        4. The league's current scoring period, the only one ESPN accepts for
+           a write (brief §4); never a parameter.
+        """
+        if not self._credentials.get("espn_s2"):
+            raise AuthMissingError(
+                "Writing to ESPN needs the espn_s2 cookie, and none is configured.",
+                remediation=(
+                    "Run `fantasy-sports auth login`, or set FANTASY_SPORTS_ESPN_S2 in the "
+                    "environment."
+                ),
+                details={"missing": ["espn_s2"]},
+            )
+        mismatch = self._identity_mismatches.get((str(league_id), int(season)))
+        if mismatch is not None:
+            raise WriteRejectedError(
+                "Refusing to write: an earlier write in this session showed that the "
+                "configured SWID and espn_s2 belong to different ESPN accounts, so team "
+                "ownership cannot be trusted.",
+                kind="not_owned",
+                team_id=str(team_id).strip(),
+                remediation=(
+                    "The SWID and espn_s2 appear to belong to different accounts. Re-run "
+                    "`fantasy-sports auth login` and store both cookies from the same "
+                    "logged-in browser session."
+                ),
+                details={"expected_member": mismatch[0], "observed_member": mismatch[1]},
+            )
+        credentials = self.credential_report()
+        role = self.session_role(league_id, season)
+        team = _guard(role, team_id)
+        period = _current_period(self._bootstrap_payload(league_id, season))
+        return _Write(
+            league_id=str(league_id),
+            season=int(season),
+            team_id=team,
+            scoring_period=period,
+            credentials=credentials,
+            member_id=role.member_id,
+        )
+
+    def _lineup_items(self, write: _Write, target: Mapping[str, str]) -> list[dict[str, Any]]:
+        """The diff between ``target`` and the **current** roster.
+
+        The roster is fetched here, explicitly and bypassing the cache, for the
+        period the write will be sent for. Reusing whatever ``mRoster`` this instance last recorded
+        would diff against a historical week after a ``fetch_roster(week=N)``
+        on the same provider (PR #118 review), and every item would carry the
+        wrong ``fromLineupSlotId``.
+        """
+        team_id = write.team_id
+        if not isinstance(target, Mapping) or not target:
+            raise ConfigInvalidError(
+                "A lineup target names no players.",
+                kind="argument",
+                remediation="Map at least one player id to the slot it should occupy.",
+            )
+        from fantasy_sports.cache.store import CacheMode
+
+        with _mapped(view="mRoster", operation="set_lineup", provider=self):
+            league = self._league(write.league_id, write.season)
+            # Live, whatever the provider's cache mode: a roster up to five
+            # minutes old is exactly the stale `fromLineupSlotId` this read
+            # exists to avoid. BYPASS neither reads nor writes the store, and
+            # the store still scrubs the body.
+            with self._transport(write.league_id, write.season).mode_for_call(CacheMode.BYPASS):
+                current = league.espn_request.league_get(
+                    params={"view": "mRoster", "scoringPeriodId": write.scoring_period}
+                )
+        entries = _team_entries(current, team_id) or {}
+        items: list[dict[str, Any]] = []
+        for player, slot in target.items():
+            player_id = _as_int(player)
+            entry = entries.get(player_id) if player_id is not None else None
+            if entry is None:
+                raise ConfigInvalidError(
+                    f"Player {player!r} is not on team {team_id}'s roster.",
+                    kind="argument",
+                    remediation="Run `fantasy-sports roster` for this team's player ids.",
+                    details={"player_id": str(player)},
+                )
+            to_slot = _slot_id(slot)
+            if to_slot is None:
+                raise ConfigInvalidError(
+                    f"{slot!r} is not an ESPN lineup slot.",
+                    kind="argument",
+                    remediation="Use a slot name from `fantasy-sports league` roster_slots.",
+                    details={"player_id": str(player), "slot": str(slot)},
+                )
+            eligible = _eligible_slot_ids(entry)
+            if eligible is not None and to_slot not in eligible:
+                raise ConfigInvalidError(
+                    f"Player {player_id} is not eligible for the {slot} slot.",
+                    kind="argument",
+                    remediation="Choose a slot from the player's eligible_slots.",
+                    details={"player_id": str(player_id), "slot": slot},
+                )
+            from_slot = _as_int(entry.get("lineupSlotId"))
+            if from_slot is None:
+                raise SchemaDriftError(
+                    "A roster entry has no lineupSlotId.",
+                    path=["mRoster", "entries", "lineupSlotId"],
+                    provider=PROVIDER,
+                )
+            if from_slot != to_slot:
+                items.append(
+                    {
+                        "playerId": player_id,
+                        "type": "LINEUP",
+                        "fromLineupSlotId": from_slot,
+                        "toLineupSlotId": to_slot,
+                    }
+                )
+        if not items:
+            raise ConfigInvalidError(
+                "Every player named is already in that slot; there is nothing to send.",
+                kind="argument",
+                remediation=(
+                    "ESPN has no no-op transaction. Name at least one player whose slot changes."
+                ),
+            )
+        # Vacates before fills, stable otherwise (brief §3).
+        items.sort(key=lambda item: item["toLineupSlotId"] not in _BENCH_SLOT_IDS)
+        return items
+
+    def _role_from(
+        self, nav: Any, bootstrap: Mapping[str, Any], *, key: tuple[str, int]
+    ) -> SessionRole:
+        if not isinstance(nav, Mapping) or not isinstance(nav.get("members"), list):
+            raise SchemaDriftError(
+                "ESPN's mNav response has no members list.",
+                path=["mNav", "members"],
+                provider=PROVIDER,
+            )
+        salt = self._swid_salt()
+        swid = self._credentials.get("swid")
+        echoed = self._echoed_members.get(key)
+        if swid:
+            member_id: str | None = swid_pseudonym(swid, salt=salt)
+            candidates = {_guid_key(swid), _guid_key(member_id)}
+        elif echoed:
+            member_id = echoed
+            candidates = {_guid_key(echoed)}
+        else:
+            member_id = None
+            candidates = set()
+        candidates.discard(None)
+
+        member = next(
+            (
+                row
+                for row in nav["members"]
+                if isinstance(row, Mapping) and _guid_key(row.get("id")) in candidates
+            ),
+            None,
+        )
+        if member is not None and member.get("isLeagueCreator") is True:
+            role = "creator"
+        elif member is not None and member.get("isLeagueManager") is True:
+            role = "manager"
+        else:
+            role = "member"
+
+        teams = nav.get("teams")
+        if not isinstance(teams, list):
+            teams = bootstrap.get("teams") if isinstance(bootstrap, Mapping) else None
+        owned: list[str] = []
+        for team in teams if isinstance(teams, list) else []:
+            if not isinstance(team, Mapping) or _as_int(team.get("id")) is None:
+                continue
+            owners = team.get("owners")
+            if isinstance(owners, list) and any(_guid_key(o) in candidates for o in owners):
+                owned.append(str(_as_int(team["id"])))
+
+        raw = (
+            {}
+            if member is None
+            else json.loads(scrub_body(json.dumps(dict(member)), swid_salt=salt))
+        )
+        return SessionRole(
+            provider=PROVIDER,
+            member_id=member_id,
+            role=role,  # type: ignore[arg-type]  # one of the three literals above
+            owned_team_ids=tuple(sorted(set(owned), key=int)),
+            raw=raw,
+        )
+
+    def _swid_salt(self) -> str:
+        """The salt this provider's reads were pseudonymised under.
+
+        The store's own when there is one -- that is what the cache scrubbed
+        the bodies with -- and the public cassette salt otherwise, so a
+        store-less provider still never reports a raw SWID.
+        """
+        return self._cache.swid_salt if self._cache is not None else CASSETTE_SWID_SALT
+
+    def _post(self, write: _Write, envelope: Mapping[str, Any]) -> WriteResult:
+        """Send one transaction, once, and map whatever comes back.
+
+        The body is assembled here so that the fields every write shares --
+        ``isLeagueManager: false``, ``teamId``, ``scoringPeriodId`` -- cannot
+        be got wrong by a caller. ``isLeagueManager`` is never ``true``
+        (brief §7), and no ``memberId`` is sent: ESPN fills it from the
+        session (brief §2.2), and sending one would put the SWID in a body.
+
+        Only ``espn_s2`` goes on the wire. The SWID is not needed for a write
+        (brief §6.3) and is not sent, which removes it from every leak channel
+        on the mutation path.
+        """
+        body: dict[str, Any] = {
+            "isLeagueManager": False,
+            "teamId": write.team_id,
+            "type": envelope["type"],
+            "scoringPeriodId": write.scoring_period,
+            "executionType": envelope["executionType"],
+        }
+        for name in ("items", "bidAmount", "relatedTransactionId"):
+            if name in envelope:
+                body[name] = envelope[name]
+
+        url = WRITE_URL.format(season=write.season, league_id=write.league_id)
+        cookies = {"espn_s2": self._credentials["espn_s2"]}
+        post = self._http_post
+        if post is None:
+            import requests
+
+            post = requests.post
+        try:
+            # Exactly one attempt. There is no retry loop anywhere on this
+            # path: a write whose outcome is unknown must be read back, not
+            # re-sent (brief §8 item 1).
+            response = post(
+                url,
+                json=body,
+                headers=dict(_WRITE_HEADERS),
+                cookies=cookies,
+                timeout=WRITE_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:  # noqa: BLE001 - every transport failure is "unknown"
+            # A timeout, a reset, a DNS failure mid-retry inside `requests` --
+            # none of them says whether ESPN received and applied the body.
+            # Classifying any of them as "not applied" is the double-spend.
+            raise ProviderUnavailableError(
+                f"The write to ESPN did not complete ({type(exc).__name__}: {_clean(exc)}).",
+                remediation=_UNKNOWN_STATE_REMEDIATION,
+                details={
+                    "transaction_state": "unknown",
+                    "cause": type(exc).__name__,
+                    "team_id": str(write.team_id),
+                },
+            ) from exc
+
+        fetched_at = self._now()
+        payload = _write_payload(response, swid_salt=self._swid_salt())
+        status = _as_int(getattr(response, "status_code", None))
+        if status == 200:
+            # Purge before parsing: the write applied whether or not the body
+            # turns out to be readable, and a stale roster served after a
+            # successful write is the incoherence R10 exists to prevent.
+            self._after_success(write)
+        result = _write_outcome(
+            status,
+            payload,
+            headers=getattr(response, "headers", None) or {},
+            cookies_sent=bool(cookies.get("espn_s2")),
+            write=write,
+        )
+        self.last_fetch = FetchRecord(
+            responses={
+                **(self.last_fetch.responses if self.last_fetch is not None else {}),
+                "transactions": RawResponse(
+                    view="transactions", payload=payload, fetched_at=fetched_at, cached=False
+                ),
+            }
+        )
+        self._check_identity(write, result)
+        if result.member_id:
+            self._echoed_members[(write.league_id, write.season)] = result.member_id
+        return result
+
+    def _check_identity(self, write: _Write, result: WriteResult) -> None:
+        """Prove, after the fact, that the session that wrote is the one the
+        guard checked ownership for.
+
+        Ownership is derived from the SWID, but ESPN authenticates the write
+        with ``espn_s2``, and the credential chain resolves the two
+        independently -- so a hand-configured pair from two accounts would
+        pass the guard for the SWID's teams while writing as someone else.
+        No pre-write identity endpoint is trusted, so the check is the
+        ``memberId`` ESPN echoes on the write itself. A mismatch is recorded
+        for this league, refusing every later write in the process, and the
+        write that just happened is reported as ``WRITE_DIVERGED`` with
+        everything a caller needs to journal it.
+        """
+        expected, observed = write.member_id, result.member_id
+        if not expected or not observed or _guid_key(expected) == _guid_key(observed):
+            return
+        key = (write.league_id, write.season)
+        self._identity_mismatches[key] = (expected, observed)
+        raise WriteDivergedError(
+            "ESPN applied this write as a different member than the configured SWID: "
+            "the SWID and espn_s2 appear to belong to different ESPN accounts.",
+            expected={"member_id": expected},
+            observed={"member_id": observed},
+            remediation=(
+                "The write may have changed a team this session was not verified to own. "
+                "Read `transactions` for this league, then re-run `fantasy-sports auth "
+                "login` and store both cookies from the same logged-in browser session. "
+                "Further writes are refused until then."
+            ),
+            details={
+                "expected_member": expected,
+                "observed_member": observed,
+                "provider_transaction_id": result.provider_transaction_id,
+                "team_id": result.team_id,
+                "status": result.status,
+                "is_pending": result.is_pending,
+                "proposed_at": None
+                if result.proposed_at is None
+                else result.proposed_at.isoformat(),
+                "items": [dict(item) for item in result.items],
+                "transaction_state": "applied",
+            },
+        )
+
+    def _after_success(self, write: _Write) -> None:
+        """Make the cache and the memoised league forget what the write changed.
+
+        Everything tagged with this league and this scoring period (R10) --
+        rosters, matchups, standings, transactions all moved within 1.5 s of
+        each probed write (brief §9). Season-scoped entries (the player map,
+        the NFL schedule) carry no league tag and are untouched; the store
+        refuses to league-purge them by construction.
+        """
+        from fantasy_sports.cache.tags import league_tag, scoring_period_tag
+
+        if self._cache is not None:
+            self._cache.purge_by_league_tag(league_tag(PROVIDER, write.league_id, write.season))
+            self._cache.purge_by_league_tag(
+                scoring_period_tag(PROVIDER, write.league_id, write.season, write.scoring_period)
+            )
+        # The next read re-bootstraps rather than reusing rosters this write
+        # just made stale.
+        self._leagues.pop((write.league_id, write.season), None)
 
     # --- plumbing ---------------------------------------------------------- #
 
@@ -1742,6 +2321,344 @@ def _unknown_status(exc: BaseException, *, view: str) -> FantasySportsError:
 
 
 # --------------------------------------------------------------------------- #
+# Writes
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class _Write:
+    """What one write has established before its body is built."""
+
+    league_id: str
+    season: int
+    team_id: int
+    scoring_period: int
+    credentials: Mapping[str, Any]
+    member_id: str | None = None
+    """The member the guard checked ownership for, as a pseudonym."""
+
+
+def _is_credential_set(credentials: Any) -> bool:
+    """Whether ``credentials`` is the auth chain's ``CredentialSet``.
+
+    Duck-typed so this module does not import ``auth/`` at module scope.
+    """
+    return hasattr(credentials, "resolved") and hasattr(credentials, "missing")
+
+
+def _credentials_block(
+    credential_set: Any, *, state_path: Path | None = None, now: datetime | None = None
+) -> dict[str, Any]:
+    """R12a: how old ``espn_s2`` is, and what the user should be told about it.
+
+    Read from the auth chain's own staleness report, so this and ``auth
+    status`` can never disagree. Age is only knowable for a cookie this tool
+    stored in the Keychain; anything else -- an environment variable, a plain
+    mapping handed to the constructor, a missing state file -- is reported as
+    unknown rather than guessed (``docs/memory/credential-leak-channels.md``,
+    "an age you cannot attribute is not an age"). Never raises: this is a
+    diagnostic, and a write must not fail because its bookkeeping did.
+    """
+    unknown = "credential age unknown"
+    if credential_set is None:
+        return {"espn_s2_age_seconds": None, "warning": unknown}
+    try:
+        from fantasy_sports.auth.staleness import build_auth_status
+
+        report = build_auth_status(credential_set, state_path=state_path, now=now)
+        row = next((item for item in report.credentials if item.name == "espn_s2"), None)
+        warnings = list(report.warnings)
+    except Exception:  # noqa: BLE001 - fail-soft; see docstring
+        return {"espn_s2_age_seconds": None, "warning": unknown}
+    age = None if row is None or row.age is None else int(row.age.total_seconds())
+    if age is None:
+        warnings.insert(0, unknown)
+    return {"espn_s2_age_seconds": age, "warning": "; ".join(warnings) or None}
+
+
+def _guid_key(value: Any) -> str | None:
+    """A member id in one comparable spelling: brace-wrapped, upper-case."""
+    if not isinstance(value, str) or not value.strip().strip("{}"):
+        return None
+    return "{" + value.strip().strip("{}").upper() + "}"
+
+
+def _guard(role: SessionRole, team_id: Any) -> int:
+    """The ownership guard. Refuse-closed, no override, before any body exists.
+
+    ESPN honoured a commissioner's write on another manager's team without
+    being asked to act as LM (brief §6), so "only my team" is ours to enforce
+    and ESPN will not do it for us. Ownership that cannot be determined is a
+    refusal, never a pass.
+    """
+    wanted = str(team_id).strip()
+    if role.member_id is None:
+        raise WriteRejectedError(
+            "Refusing to write: the session's ESPN member could not be identified, so "
+            "team ownership cannot be verified.",
+            kind="not_owned",
+            team_id=wanted,
+            remediation=(
+                "Configure the SWID so ownership can be verified (`fantasy-sports auth "
+                "login`, or FANTASY_SPORTS_SWID). Writes are refused until it is."
+            ),
+        )
+    if wanted not in role.owned_team_ids:
+        owned = ", ".join(role.owned_team_ids) or "none"
+        raise WriteRejectedError(
+            f"Refusing to write to team {wanted}: the configured session does not own it.",
+            kind="not_owned",
+            team_id=wanted,
+            remediation=(
+                f"Teams this session owns in this league: {owned}. Writes to any other "
+                "team are refused regardless of league-manager role."
+            ),
+            details={"owned_team_ids": list(role.owned_team_ids)},
+        )
+    return int(wanted)
+
+
+def _current_period(bootstrap: Mapping[str, Any]) -> int:
+    """The league's current scoring period -- the only one ESPN accepts (brief §4)."""
+    period = _as_int(bootstrap.get("scoringPeriodId")) if isinstance(bootstrap, Mapping) else None
+    if period is None:
+        status = bootstrap.get("status") if isinstance(bootstrap, Mapping) else None
+        period = _as_int(status.get("latestScoringPeriod")) if isinstance(status, Mapping) else None
+    if period is None:
+        raise SchemaDriftError(
+            "The league payload carries no current scoring period.",
+            path=["scoringPeriodId"],
+            provider=PROVIDER,
+        )
+    return period
+
+
+def _slot_id(name: Any) -> int | None:
+    """A lineup slot *name* as ESPN's ``lineupSlotId``, or ``None``.
+
+    Built from ``POSITION_MAP``'s integer keys. Its string keys are the
+    free-agent *filter* vocabulary and do not include ``BE``, ``IR`` or
+    ``RB/WR/TE`` -- reading them would refuse the three slots a lineup change
+    most often targets.
+    """
+    from espn_api.football.constant import POSITION_MAP
+
+    if not isinstance(name, str) or not name.strip():
+        return None
+    wanted = name.strip().upper()
+    for slot_id, slot_name in POSITION_MAP.items():
+        if isinstance(slot_id, int) and isinstance(slot_name, str) and slot_name.upper() == wanted:
+            return slot_id
+    return None
+
+
+def _eligible_slot_ids(entry: Mapping[str, Any]) -> frozenset[int] | None:
+    """A roster entry's ``eligibleSlots``, or ``None`` when it publishes none."""
+    pool = entry.get("playerPoolEntry")
+    player = pool.get("player") if isinstance(pool, Mapping) else None
+    slots = player.get("eligibleSlots") if isinstance(player, Mapping) else None
+    if not isinstance(slots, list):
+        return None
+    return frozenset(slot for slot in (_as_int(item) for item in slots) if slot is not None)
+
+
+def _move_item(move: RosterMove, kind: str, team_key: str, team_id: int) -> dict[str, Any]:
+    """One ``ADD``/``DROP`` item. Community shape, unconfirmed -- see #108."""
+    player_id = _as_int(getattr(move, "player_id", None))
+    if player_id is None:
+        raise ConfigInvalidError(
+            f"ESPN player ids are numeric; got {getattr(move, 'player_id', None)!r}.",
+            kind="argument",
+            remediation="Use the provider_id `free-agents` or `roster` reports.",
+        )
+    item: dict[str, Any] = {"playerId": player_id, "type": kind, team_key: team_id}
+    for attribute, key in (("from_slot", "fromLineupSlotId"), ("to_slot", "toLineupSlotId")):
+        name = getattr(move, attribute, None)
+        if name is None:
+            continue
+        slot = _slot_id(name)
+        if slot is None:
+            raise ConfigInvalidError(
+                f"{name!r} is not an ESPN lineup slot.",
+                kind="argument",
+                remediation="Use a slot name from `fantasy-sports league` roster_slots.",
+                details={"player_id": str(player_id), "slot": str(name)},
+            )
+        item[key] = slot
+    return item
+
+
+def _write_payload(response: Any, *, swid_salt: str) -> Any:
+    """The write response body, scrubbed, as JSON -- or ``None``.
+
+    Scrubbed with the same salt the reads were, so the ``memberId`` ESPN
+    echoes becomes the same pseudonym ``session_role`` reports and the SWID
+    never reaches ``raw``. An unreadable body is ``None``: it is not evidence
+    of anything, and the status code still decides the outcome.
+    """
+    try:
+        return json.loads(scrub_body(getattr(response, "content", b"") or b"", swid_salt=swid_salt))
+    except Exception:  # noqa: BLE001 - see docstring
+        return None
+
+
+def _first_detail(payload: Any) -> tuple[str | None, str | None]:
+    """``(details[0].type, messages[0])`` from an ESPN rejection body."""
+    if not isinstance(payload, Mapping):
+        return None, None
+    provider_type = None
+    details = payload.get("details")
+    if isinstance(details, list):
+        for detail in details:
+            if isinstance(detail, Mapping) and isinstance(detail.get("type"), str):
+                provider_type = detail["type"]
+                break
+    message = None
+    messages = payload.get("messages")
+    if isinstance(messages, list) and messages and isinstance(messages[0], str):
+        message = messages[0]
+    return provider_type, message
+
+
+def _write_outcome(
+    status: int | None,
+    payload: Any,
+    *,
+    headers: Mapping[str, str],
+    cookies_sent: bool,
+    write: _Write,
+) -> WriteResult:
+    """Map one write-host response to a result or a taxonomy error (brief §5.3).
+
+    * ``200`` -> :class:`WriteResult`.
+    * ``401`` with a credential sent -> ``WRITE_REJECTED`` ``kind="auth"``,
+      **never** ``AUTH_EXPIRED``: the write host's 401 is the constant
+      ``AUTH_MISSING_CREDENTIALS`` for no cookie, a bad cookie and a SWID-only
+      request alike, and the read that preceded this write just succeeded on
+      the same cookie (brief §5.1 item 1). With nothing sent -> ``AUTH_MISSING``.
+      That branch is unreachable through the public methods, which refuse
+      before sending without ``espn_s2``; it is kept so the mapping is total.
+    * ``400`` without ``details[]`` -> ``SCHEMA_DRIFT``: a body ESPN could not
+      read is our bug or ESPN's shape moving, never a user's (brief §5.1 item
+      2). A typed 400 is a rejection like any other.
+    * ``409`` -> ``WRITE_REJECTED`` with ``kind`` from :data:`_TRAN_KINDS`.
+    * ``429`` -> ``RATE_LIMITED`` with ``Retry-After``.
+    * ``5xx`` and anything else -> ``PROVIDER_UNAVAILABLE`` with
+      ``transaction_state: "unknown"``: we cannot say it did not apply.
+    """
+    team = str(write.team_id)
+    if status == 200:
+        return _write_result(payload, write=write)
+
+    provider_type, message = _first_detail(payload)
+    if status == 401:
+        if not cookies_sent:
+            raise AuthMissingError(
+                "ESPN refused the write and no espn_s2 cookie was sent.",
+                remediation="Run `fantasy-sports auth login`.",
+                details={"http_status": 401},
+            )
+        raise WriteRejectedError(
+            "ESPN's write host refused this session (HTTP 401). Its 401 is the same "
+            "constant for a missing, invalid, or refused cookie, so this does not say "
+            "the cookie expired.",
+            kind="auth",
+            provider_type=provider_type,
+            http_status=401,
+            team_id=team,
+            remediation=(
+                "The same session read this league a moment ago; ESPN refused the "
+                "write. Check `fantasy-sports auth status`, then whether write access "
+                "to this league changed."
+            ),
+        )
+    if status == 400 and provider_type is None:
+        raise SchemaDriftError(
+            "ESPN could not read the write request (HTTP 400, no typed reason).",
+            path=["transactions"],
+            provider=PROVIDER,
+            remediation="Stop and file an issue: the transaction body or ESPN's shape changed.",
+            details={"http_status": 400},
+        )
+    if status in (400, 409):
+        kind = _TRAN_KINDS.get(provider_type or "", "unknown")
+        raise WriteRejectedError(
+            f"ESPN rejected the transaction ({provider_type or 'no reason given'}).",
+            kind=kind,
+            provider_type=provider_type,
+            http_status=status,
+            team_id=team,
+            remediation=message,
+        )
+    if status == 429:
+        raise RateLimitedError(
+            "ESPN throttled the write (HTTP 429).",
+            retry_after=_retry_after_seconds(_header(headers, "Retry-After")),
+            remediation="Wait for `details.retry_after` seconds, then retry.",
+            details={"http_status": 429},
+        )
+    raise ProviderUnavailableError(
+        f"ESPN's write host answered HTTP {status}.",
+        remediation=_UNKNOWN_STATE_REMEDIATION,
+        details={"transaction_state": "unknown", "http_status": status, "team_id": team},
+    )
+
+
+def _header(headers: Mapping[str, str], name: str) -> str | None:
+    """One header, case-insensitively whether or not ``headers`` is ``requests``'
+    own case-insensitive mapping."""
+    found = headers.get(name)
+    if found is None:
+        found = next(
+            (value for key, value in headers.items() if str(key).lower() == name.lower()), None
+        )
+    return found
+
+
+def _write_result(payload: Any, *, write: _Write) -> WriteResult:
+    """A ``200`` body as a :class:`WriteResult`. Shape changes are drift."""
+    if not isinstance(payload, Mapping):
+        raise SchemaDriftError(
+            "ESPN accepted the write but its response is not a JSON object.",
+            path=["transactions"],
+            provider=PROVIDER,
+            remediation=_UNKNOWN_STATE_REMEDIATION,
+            details={"transaction_state": "unknown"},
+        )
+    transaction_id = payload.get("id")
+    status = payload.get("status")
+    if not isinstance(transaction_id, str) or not isinstance(status, str):
+        missing = [name for name in ("id", "status") if not isinstance(payload.get(name), str)]
+        raise SchemaDriftError(
+            "ESPN accepted the write but its response lacks " + ", ".join(missing) + ".",
+            path=[f"transactions.{name}" for name in missing],
+            provider=PROVIDER,
+            remediation=_UNKNOWN_STATE_REMEDIATION,
+            details={"transaction_state": "unknown"},
+        )
+    proposed = payload.get("proposedDate")
+    proposed_ms = None if isinstance(proposed, bool) else _as_int(proposed)
+    items = payload.get("items")
+    member = payload.get("memberId")
+    team = _as_int(payload.get("teamId"))
+    return WriteResult(
+        provider=PROVIDER,
+        provider_transaction_id=transaction_id,
+        status=status,
+        is_pending=payload.get("isPending") is True,
+        proposed_at=None if proposed_ms is None else from_epoch_millis(proposed_ms),
+        bid_amount=_as_int(payload.get("bidAmount")),
+        team_id=str(write.team_id if team is None else team),
+        items=tuple(dict(item) for item in items if isinstance(item, Mapping))
+        if isinstance(items, list)
+        else (),
+        member_id=member if isinstance(member, str) and member else None,
+        credentials=dict(write.credentials),
+        raw=dict(payload),
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Normalization
 # --------------------------------------------------------------------------- #
 
@@ -1924,16 +2841,27 @@ def _roster_entries(
         response = _latest(transport.responses, view)
         if response is None or not isinstance(response.payload, Mapping):
             continue
-        for team in response.payload.get("teams", []) or []:
-            if not isinstance(team, Mapping) or team.get("id") != team_id:
-                continue
-            entries = team.get("roster", {}).get("entries", [])
-            return {
-                entry["playerId"]: entry
-                for entry in entries
-                if isinstance(entry, Mapping) and "playerId" in entry
-            }
+        found = _team_entries(response.payload, team_id)
+        if found is not None:
+            return found
     return {}
+
+
+def _team_entries(payload: Any, team_id: int) -> dict[int, Mapping[str, Any]] | None:
+    """One team's raw roster entries from a payload, or ``None`` if it has no
+    such team."""
+    teams = payload.get("teams") if isinstance(payload, Mapping) else None
+    for team in teams if isinstance(teams, list) else []:
+        if not isinstance(team, Mapping) or team.get("id") != team_id:
+            continue
+        roster = team.get("roster")
+        entries = roster.get("entries", []) if isinstance(roster, Mapping) else []
+        return {
+            entry["playerId"]: entry
+            for entry in entries or []
+            if isinstance(entry, Mapping) and "playerId" in entry
+        }
+    return None
 
 
 def _free_agent_entries(responses: Mapping[str, RawResponse]) -> dict[int, Mapping[str, Any]]:

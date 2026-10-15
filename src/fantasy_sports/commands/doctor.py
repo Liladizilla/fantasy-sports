@@ -207,9 +207,25 @@ def _credentials_check() -> DoctorCheck:
     report = build_auth_status(resolved)
     payload = report.to_payload()
 
+    # The write path checks ownership against the SWID but authenticates as
+    # espn_s2's session, and the chain resolves the two independently. Two
+    # cookies from two different links (env, Keychain, config) are the cheap,
+    # no-network signal that they may belong to two accounts (#107, PR #118).
+    s2, swid = resolved.get("espn_s2"), resolved.get("swid")
+    split = s2 is not None and swid is not None and s2.source is not swid.source
+    payload["sources_match"] = None if s2 is None or swid is None else not split
+
     if not report.complete:
         status = CheckStatus.WARN
         summary = "ESPN credentials are not fully configured."
+    elif split:
+        assert s2 is not None and swid is not None  # narrowed by `split`
+        status = CheckStatus.WARN
+        summary = (
+            f"espn_s2 resolves from {s2.source.value} but swid from {swid.source.value}; "
+            "if they belong to different ESPN accounts, writes are refused after the "
+            "first one. Run `fantasy-sports auth login` to store both together."
+        )
     elif any(status.freshness is Freshness.STALE for status in report.credentials):
         status = CheckStatus.WARN
         summary = "ESPN credentials are configured, but at least one looks stale."

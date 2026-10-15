@@ -10,6 +10,18 @@ football API, distributed via `uv tool install fantasy-sports`.
 
 ### Added
 
+- **The ESPN write transport and ownership guard** — a second Protocol,
+  `WritingProvider` (`session_role`, `set_lineup`, `move_players`,
+  `cancel_transaction`), with `SessionRole`, `RosterMove`, and `WriteResult`
+  models. The ESPN adapter resolves the session's role from `mNav` and
+  refuses, before building a request, any team the session does not own
+  (`WRITE_REJECTED` `not_owned`, refuse-closed when ownership is unknown, no
+  override). One POST to `lm-api-writes` with `espn_s2` only and no
+  `memberId`; a 15 s timeout, never retried, reported as
+  `transaction_state: "unknown"`; every status mapped to the taxonomy; a
+  success purges the league and scoring-period cache tags. Every result
+  carries `credentials.espn_s2_age_seconds`. No command writes yet; the
+  add/drop/waiver/cancel shapes are community-attested until #108 (#107).
 - **Mutation journal store** — `core/journal.py` (standard library only): a
   SQLite journal at `$XDG_STATE_HOME/fantasy-sports/journal.sqlite` (file
   `0600`, directory `0700`) with a two-phase `begin` / `complete` | `reject` |

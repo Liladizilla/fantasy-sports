@@ -314,6 +314,14 @@ operational failure in this space and no existing tool surfaces it.
 Secrets are never logged, never printed, and redacted in all error paths
 including tracebacks.
 
+**Writes send `espn_s2` only, never the SWID.** `espn_s2` is the session;
+the write host accepts a transaction with it alone, and the SWID cookie and a
+body `memberId` are both optional (`docs/research/05-espn-write-surface.md`
+§2.2, §6.3). So the write path puts exactly one secret on the wire, sends no
+`memberId`, and the SWID is used only locally — to find the session's own
+member in `mNav`, compared against the cache's pseudonym of it, so it never
+reaches a request body or a result either (#107).
+
 ---
 
 ## 7. Multi-league configuration
@@ -389,6 +397,41 @@ processed waiver claims, and trades cannot be undone, and even a lineup change
 locks at kickoff. ADR-0006's fourth gate — routing autonomous writes through
 `/sanity-gate` — was never superseded and still stands for that irreversible
 class. See ADR-0006 and the requirements doc; both need amendment.
+
+**The write transport (#107).** Every write goes through one method on the
+adapter that refuses before it builds, sends once, and maps everything that
+comes back:
+
+- **Ownership is refused client-side, before a body exists.** `session_role`
+  reads `mNav` (`isLeagueCreator` *and* `isLeagueManager`) and the session's
+  `teams[].owners`; a `team_id` outside that set is `WRITE_REJECTED`
+  `kind: "not_owned"`, regardless of role, and ownership that cannot be
+  determined is refused the same way. There is no override parameter. A
+  commissioner's cookie is honoured by ESPN on another manager's team
+  (brief §6), so this guard is the only thing that keeps `--team` meaning
+  "which of *my* teams".
+- **The writing session must be the owning one.** Ownership comes from the
+  SWID; ESPN authenticates the write as `espn_s2`. The `memberId` a write
+  echoes is checked against the guard's member: a mismatch is
+  `WRITE_DIVERGED` for that write and refuses every later one. A hand-split
+  pair is therefore caught after its first write, not before; `auth login`
+  stores both together and `doctor` warns when they come from different
+  links.
+- **A timeout is not a failure.** The POST has a 15 s timeout (over a
+  hundred times the observed latency) and is sent exactly once. A timeout or
+  connection error after sending is `PROVIDER_UNAVAILABLE` with
+  `details.transaction_state: "unknown"` and a remediation to read
+  `transactions` (and `claims`) before retrying: a blind retry of a lineup is
+  harmless, a blind retry of a waiver claim is a double spend (brief §8 item
+  1). There is no retry loop on the write path.
+- **The cache is coherent after a success.** A `200` purges every entry
+  tagged with this league and this scoring period through
+  `CacheStore.purge_by_league_tag` — before the response is parsed, since the
+  write applied whether or not its body is readable — and drops the memoised
+  league so the next read re-bootstraps. Season-scoped entries are untouched.
+- **Every result carries credential age** (`credentials:
+  {espn_s2_age_seconds, warning}`), computed before the request from the same
+  staleness report `auth status` renders.
 
 ---
 

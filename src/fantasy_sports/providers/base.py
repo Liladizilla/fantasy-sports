@@ -57,6 +57,7 @@ never import ``typer``, ``click``, ``rich``, or ``espn_api``.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any, Final, Protocol, runtime_checkable
 
@@ -66,12 +67,15 @@ from fantasy_sports.core.models import (
     FreeAgent,
     League,
     Matchup,
+    RosterMove,
     RosterSlot,
+    SessionRole,
     Team,
     Transaction,
+    WriteResult,
 )
 
-__all__ = ["PROVIDER_METHODS", "Provider"]
+__all__ = ["PROVIDER_METHODS", "WRITING_PROVIDER_METHODS", "Provider", "WritingProvider"]
 
 #: The Protocol's method surface, in the order issue #3 enumerates it. Pinned
 #: by a test so a method cannot be added or dropped without a deliberate change.
@@ -199,4 +203,83 @@ class Provider(Protocol):
         pair. Using raw access should look like using the provider's own API,
         not like translating through an invented query language.
         """
+        ...
+
+
+#: The write surface, pinned the same way as :data:`PROVIDER_METHODS`.
+WRITING_PROVIDER_METHODS: Final[tuple[str, ...]] = (
+    "session_role",
+    "set_lineup",
+    "move_players",
+    "cancel_transaction",
+)
+
+
+@runtime_checkable
+class WritingProvider(Protocol):
+    """What a provider must offer to *change* a league (jwulff/fantasy-sports#107).
+
+    A second Protocol rather than more methods on :class:`Provider`, so a
+    read-only adapter still conforms to the one every command needs. An
+    adapter that writes satisfies both.
+
+    Three guarantees every implementation owes its caller, because the
+    credentials a provider holds may carry more authority than the tool should
+    exercise:
+
+    * **Ownership is refused client-side, before a request is built.** A
+      ``team_id`` outside :meth:`session_role`'s ``owned_team_ids`` raises
+      ``WRITE_REJECTED`` with ``kind="not_owned"``. Ownership that cannot be
+      determined is refused the same way -- refuse-closed, never refuse-open.
+      There is no override argument, on purpose: anything acting on another
+      member's team is a separate, separately gated capability.
+    * **A write whose outcome is unknown is never retried.** A timeout after
+      sending is ``PROVIDER_UNAVAILABLE`` with ``details.transaction_state:
+      "unknown"``; the caller reads the transaction log before trying again.
+    * **The cache is coherent after a success.** Everything the write could
+      have changed is purged before the result is returned.
+
+    Every method returns a :class:`~fantasy_sports.core.models.WriteResult`
+    carrying the credential-age block, so an agent learns its cookie is old
+    from a success, not from the failure that follows.
+    """
+
+    name: str
+
+    def session_role(self, league_id: str, season: int) -> SessionRole:
+        """Who these credentials act as in this league, and which teams they own."""
+        ...
+
+    def set_lineup(
+        self, league_id: str, season: int, team_id: str, target: Mapping[str, str]
+    ) -> WriteResult:
+        """Move players to the slots ``target`` names (player id -> slot name).
+
+        Only the players whose slot changes are sent, in one atomic
+        transaction. A target identical to the current lineup is refused as a
+        bad argument rather than sent: there is no no-op transaction.
+        """
+        ...
+
+    def move_players(
+        self,
+        league_id: str,
+        season: int,
+        team_id: str,
+        *,
+        adds: Sequence[RosterMove],
+        drops: Sequence[RosterMove],
+        bid: int | None = None,
+    ) -> WriteResult:
+        """Add and/or drop players. ``bid`` makes it a waiver claim.
+
+        Irreversible once processed. The caller -- not the provider -- owns
+        the acknowledgement gate in front of this.
+        """
+        ...
+
+    def cancel_transaction(
+        self, league_id: str, season: int, team_id: str, transaction_id: str
+    ) -> WriteResult:
+        """Withdraw a pending transaction (a queued waiver claim)."""
         ...

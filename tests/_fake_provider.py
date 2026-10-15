@@ -79,3 +79,120 @@ class CrashingProvider(_Base):
     fetch_league = fetch_teams = fetch_standings = _fail
     fetch_roster = fetch_matchups = fetch_transactions = _fail
     fetch_free_agents = fetch_raw = _fail
+
+
+class WritingFake(_Base):
+    """A provider that satisfies ``WritingProvider`` and changes nothing.
+
+    For the write commands (#15, #18) and the journal (#16): every write call
+    is recorded on :attr:`calls` and answered with a canned
+    :class:`~fantasy_sports.core.models.WriteResult`. ``owned`` drives the
+    same refuse-closed ownership guard the ESPN adapter applies, so a command
+    test can prove it surfaces ``not_owned`` without a real provider.
+    ``fail_with`` makes every write raise instead, for the error paths.
+
+    The canned result's ``credentials`` block has the same keys the adapter
+    emits (R12a) so an envelope built from it has the real shape.
+    """
+
+    name = "fake"
+
+    def __init__(
+        self,
+        credentials: Any = None,
+        *,
+        owned: tuple[str, ...] = ("1",),
+        role: str = "member",
+        member_id: str | None = "{00000000-0000-0000-0000-000000000001}",
+        result: Any = None,
+        fail_with: BaseException | None = None,
+        **options: Any,
+    ) -> None:
+        super().__init__(credentials, **options)
+        self.owned = tuple(owned)
+        self.role = role
+        self.member_id = member_id
+        self.result = result
+        self.fail_with = fail_with
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    def session_role(self, league_id: str, season: int) -> Any:
+        from fantasy_sports.core.models import SessionRole
+
+        self.calls.append(("session_role", {"league_id": league_id, "season": season}))
+        return SessionRole(
+            provider=self.name,
+            member_id=self.member_id,
+            role=self.role,  # type: ignore[arg-type]
+            owned_team_ids=self.owned if self.member_id else (),
+            raw={},
+        )
+
+    def set_lineup(self, league_id: str, season: int, team_id: str, target: Any) -> Any:
+        return self._write(
+            "set_lineup", league_id, season, team_id, target=dict(target), kind="ROSTER"
+        )
+
+    def move_players(
+        self,
+        league_id: str,
+        season: int,
+        team_id: str,
+        *,
+        adds: Any,
+        drops: Any,
+        bid: int | None = None,
+    ) -> Any:
+        return self._write(
+            "move_players",
+            league_id,
+            season,
+            team_id,
+            adds=list(adds),
+            drops=list(drops),
+            bid=bid,
+            kind="FREEAGENT" if bid is None else "WAIVER",
+        )
+
+    def cancel_transaction(
+        self, league_id: str, season: int, team_id: str, transaction_id: str
+    ) -> Any:
+        return self._write(
+            "cancel_transaction",
+            league_id,
+            season,
+            team_id,
+            transaction_id=transaction_id,
+            kind="CANCEL",
+        )
+
+    def _write(
+        self, method: str, league_id: str, season: int, team_id: str, *, kind: str, **args: Any
+    ) -> Any:
+        from fantasy_sports.core.errors import WriteRejectedError
+        from fantasy_sports.core.models import WriteResult
+
+        self.calls.append(
+            (method, {"league_id": league_id, "season": season, "team_id": team_id, **args})
+        )
+        if self.member_id is None or str(team_id) not in self.owned:
+            raise WriteRejectedError(
+                f"Refusing to write to team {team_id}: the fake session does not own it.",
+                kind="not_owned",
+                team_id=str(team_id),
+            )
+        if self.fail_with is not None:
+            raise self.fail_with
+        if self.result is not None:
+            return self.result
+        return WriteResult(
+            provider=self.name,
+            provider_transaction_id=f"fake-{len(self.calls)}",
+            status="PENDING" if kind == "WAIVER" else "EXECUTED",
+            is_pending=kind == "WAIVER",
+            team_id=str(team_id),
+            items=(),
+            member_id=self.member_id,
+            credentials={"espn_s2_age_seconds": None, "warning": "credential age unknown"},
+            raw={"type": kind},
+        )
