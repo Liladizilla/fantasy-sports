@@ -44,8 +44,18 @@ def cache_home() -> Path:
 
 
 def data_home() -> Path:
-    """Durable state — reserved for the mutation journal (KTD5)."""
+    """``$XDG_DATA_HOME`` — reserved; nothing is stored here today."""
     return _base("XDG_DATA_HOME", ".local", "share")
+
+
+def state_home() -> Path:
+    """Where the mutation journal lives — ``$XDG_STATE_HOME`` or ``~/.local/state``.
+
+    State, not data: the journal is a host-local record of what this machine
+    did, which the XDG spec files under ``STATE`` (actions history), and it is
+    what jwulff/fantasy-sports#16 specifies.
+    """
+    return _base("XDG_STATE_HOME", ".local", "state")
 
 
 def config_file() -> Path:

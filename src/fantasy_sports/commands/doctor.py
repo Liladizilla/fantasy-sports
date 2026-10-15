@@ -5,8 +5,8 @@ it starts guessing: one call that answers "config parses, credentials are
 present and not stale, the cache is reachable, and here is what upstream looks
 like" without touching ESPN unless asked to.
 
-**Six checks, four of them free.** ``python``, ``config``, ``credentials``, and
-``cache`` never leave the machine. ``version`` and ``provider_status`` make the
+**Eight checks, five of them free.** ``python``, ``config``, ``credentials``,
+``cache``, and ``journal`` never leave the machine. ``version`` and ``provider_status`` make the
 one network call ARCHITECTURE §11.3 calls "forced, ignores cache" — a 2-second,
 unauthenticated ``GET`` of the public health manifest
 (:mod:`fantasy_sports.health.client`), skipped entirely when the user opted
@@ -102,6 +102,7 @@ def doctor(*, live: bool = False) -> Envelope:
         _config_check(),
         _credentials_check(),
         _cache_check(),
+        _journal_check(),
         *_health_checks(current_version=__version__),
         _leagues_reachable_check(live=live),
     ]
@@ -266,6 +267,85 @@ def _count_cache_entries(path: Any) -> int | None:
     except sqlite3.Error:
         return None
     return int(row[0]) if row is not None else None
+
+
+def _journal_check() -> DoctorCheck:
+    """Where the mutation journal is, what is in it, and whether anything is unfinished.
+
+    Read-only: it never creates the file or its directory. A missing journal is
+    fine, because nothing has been written yet. ``pending`` rows are the point
+    of the check: an entry begun and never closed means a write may have been
+    sent without the outcome being recorded, which a person must reconcile
+    against ESPN's transaction log. A corrupt or unreadable file is a finding,
+    never an exception (``docs/memory/doctor-must-never-raise.md``).
+    """
+    from fantasy_sports.core.journal import Journal
+
+    try:
+        health = Journal.open().health()
+    except Exception as exc:  # noqa: BLE001 - a check reports; it never crashes doctor
+        return DoctorCheck(
+            name="journal",
+            status=CheckStatus.FAIL,
+            summary=f"The journal could not be inspected ({type(exc).__name__}).",
+        )
+
+    details: dict[str, Any] = {
+        "path": str(health.path),
+        "exists": health.exists,
+        "entries": health.entries,
+        "pending": health.pending,
+        "pending_ids": list(health.pending_ids),
+        "file_mode": None if health.file_mode is None else format(health.file_mode, "04o"),
+        "dir_mode": None if health.dir_mode is None else format(health.dir_mode, "04o"),
+        "permissions_ok": health.permissions_ok,
+    }
+    if health.error is not None:
+        details["error"] = health.error
+        return DoctorCheck(
+            name="journal",
+            status=CheckStatus.FAIL,
+            summary=(
+                f"Journal at {health.path} exists but cannot be read; writes are refused "
+                "until it is moved aside."
+            ),
+            details=details,
+        )
+    if not health.exists:
+        return DoctorCheck(
+            name="journal",
+            status=CheckStatus.OK,
+            summary=f"No journal yet at {health.path}; it is created by the first write.",
+            details=details,
+        )
+    if health.pending:
+        return DoctorCheck(
+            name="journal",
+            status=CheckStatus.WARN,
+            summary=(
+                f"{health.pending} journal entr{'y is' if health.pending == 1 else 'ies are'} "
+                "pending: a write was begun and its outcome never recorded. Compare with "
+                "ESPN's transaction log; see `journal show --id`."
+            ),
+            details=details,
+        )
+    if not health.permissions_ok:
+        return DoctorCheck(
+            name="journal",
+            status=CheckStatus.WARN,
+            summary=(
+                f"Journal at {health.path} is not private: expected the file 0600 and its "
+                f"directory 0700, found {details['file_mode']} and {details['dir_mode']}."
+            ),
+            details=details,
+        )
+    return DoctorCheck(
+        name="journal",
+        status=CheckStatus.OK,
+        summary=f"Journal reachable: {health.entries} entr{'y' if health.entries == 1 else 'ies'}, "
+        f"none pending, at {health.path}.",
+        details=details,
+    )
 
 
 # --------------------------------------------------------------------------- #

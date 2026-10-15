@@ -52,7 +52,7 @@ from fantasy_sports.core.redaction import (
     swid_pseudonym,
 )
 
-XDG_VARS = ("XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME")
+XDG_VARS = ("XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME")
 
 # --- synthetic credentials, shaped like the real thing --------------------- #
 

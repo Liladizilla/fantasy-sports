@@ -22,7 +22,7 @@ from fantasy_sports.config import credentials, leagues, paths
 from fantasy_sports.config.leagues import LeagueProfile
 from fantasy_sports.core.errors import ConfigInvalidError, ErrorCode, LeagueNotFoundError
 
-XDG_VARS = ("XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME")
+XDG_VARS = ("XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME")
 
 TWO_LEAGUES = """\
 default = "dynasty"
@@ -83,6 +83,7 @@ def test_config_dir_is_xdg_style_not_library_on_macos(isolated_home: Path):
 def test_cache_and_data_dirs_are_xdg_style(isolated_home: Path):
     assert paths.cache_home() == isolated_home / ".cache" / "fantasy-sports"
     assert paths.data_home() == isolated_home / ".local" / "share" / "fantasy-sports"
+    assert paths.state_home() == isolated_home / ".local" / "state" / "fantasy-sports"
 
 
 def test_config_file_lives_under_the_config_dir(isolated_home: Path):
@@ -95,6 +96,7 @@ def test_config_file_lives_under_the_config_dir(isolated_home: Path):
         ("XDG_CONFIG_HOME", "config_home"),
         ("XDG_CACHE_HOME", "cache_home"),
         ("XDG_DATA_HOME", "data_home"),
+        ("XDG_STATE_HOME", "state_home"),
     ],
 )
 def test_xdg_env_var_overrides_when_set(

@@ -682,8 +682,9 @@ Options (accepted before or after the command):
 Commands:
   auth          3 subcommands: login, logout, status
   box-scores    List both lineups for a week's matchups, player by player, with projections.
-  doctor        Run every health check: config, credentials, cache, version, provider status.
+  doctor        Run every health check: config, credentials, cache, journal, version, provider.
   free-agents   List unrostered players, optionally filtered to one position.
+  journal       2 subcommands: list, show
   league        1 subcommand: info
   matchups      List head-to-head pairings for a week, with both ESPN period identifiers.
   raw           Pass a view straight through to ESPN and return its payload unmodified.
@@ -1828,7 +1829,7 @@ fantasy-sports raw --view kona_player_info --filter '{"players":{"limit":2,"sort
 ### `doctor`
 
 Every health check in one report, cheapest and most fixable first. `python`,
-`config`, `credentials`, and `cache` never leave the machine. `version` and
+`config`, `credentials`, `cache`, and `journal` never leave the machine. `version` and
 `provider_status` fetch the project's public health manifest (skipped with
 `FANTASY_SPORTS_NO_HEALTH_CHECK=1`). `leagues_reachable` touches ESPN only
 with `--live`. `data.status` is the worst individual check; `data.ok` is the
@@ -1935,6 +1936,21 @@ fantasy-sports doctor
           "path": "~/.cache/fantasy-sports/http-cache.sqlite3",
           "entries": 10,
           "size_bytes": 2482176
+        }
+      },
+      {
+        "name": "journal",
+        "status": "ok",
+        "summary": "No journal yet at ~/.local/state/fantasy-sports/journal.sqlite; it is created by the first write.",
+        "details": {
+          "path": "~/.local/state/fantasy-sports/journal.sqlite",
+          "exists": false,
+          "entries": 0,
+          "pending": 0,
+          "pending_ids": [],
+          "file_mode": null,
+          "dir_mode": null,
+          "permissions_ok": true
         }
       },
       {
@@ -2246,6 +2262,258 @@ fantasy-sports auth logout
     "keychain_service": "fantasy-sports",
     "config_path": "~/.config/fantasy-sports/config.toml",
     "warnings": []
+  },
+  "error": null
+}
+```
+<!-- /sample -->
+
+### `journal list`
+
+The mutation journal, newest first: every write this tool attempted, who ESPN
+says made it, and how it ended. The journal is a SQLite file at
+`$XDG_STATE_HOME/fantasy-sports/journal.sqlite` (default
+`~/.local/state/fantasy-sports/`), created `0600` inside a `0700` directory.
+It is written in two phases: an entry exists, with the prior state and the
+request, **before** anything is sent, and is closed afterwards. An entry whose
+`status` is still `pending` is a write that may have gone out without its
+outcome being recorded, and `doctor` reports it.
+
+The command reads a local file: no league is resolved, no credential is
+needed, and the envelope's `provider`, `league_id`, and `season` are `null`.
+A machine that has never written is an empty list, not an error; a journal
+that exists but cannot be read is an error, because "no entries" would be a
+lie about an audit trail. Nothing writes to the journal yet, so the sample
+below is seeded; its entries have the shape the write commands will record.
+
+| Option | |
+|---|---|
+| `--league`, `-l` | Only entries for this league: a profile name from `config.toml`, or a raw league id. A filter, not a target |
+| `--limit` | Most-recent entries to return. Default 25; below 1 is `CONFIG_INVALID` |
+| `--irreversible` | Only entries that cannot be reversed (`add`, `drop`, `claim`) |
+
+<!-- sample: journal-list -->
+```bash
+fantasy-sports journal list
+# synthetic league 99, season 2026 (replayed). Exit 0, stdout. A seeded journal: the write commands that fill it land after the store:
+```
+```json
+{
+  "schema": "fantasy-sports/v1",
+  "provider": null,
+  "league_id": null,
+  "season": null,
+  "generated_at": "2026-10-15T05:53:06Z",
+  "data_as_of": null,
+  "data_age_seconds": null,
+  "sources": [],
+  "untrusted": {},
+  "raw_omitted": false,
+  "data": [
+    {
+      "id": "c47d19ab-52e0-4f3c-8a16-9e0b3d7a2c55",
+      "recorded_at": "2026-09-12T18:33:40.215Z",
+      "provider": "espn",
+      "league_id": "99",
+      "season": 2026,
+      "scoring_period": 1,
+      "command": [
+        "fantasy-sports",
+        "claim",
+        "--team",
+        "1",
+        "--bid",
+        "7"
+      ],
+      "member_id": null,
+      "role": "creator",
+      "team_id": "1",
+      "kind": "claim",
+      "reversible": false,
+      "prior_state": {
+        "9000012": 4
+      },
+      "applied_state": null,
+      "request": {
+        "teamId": 1,
+        "type": "WAIVER",
+        "bidAmount": 7
+      },
+      "provider_transaction_id": null,
+      "proposed_at": null,
+      "cost": {
+        "bid_amount": 7,
+        "displaced_player_id": "9000012"
+      },
+      "status": "pending",
+      "reverses": null,
+      "error": null
+    },
+    {
+      "id": "0f8a9c2e-6b1d-4e57-9a3c-2d7b5e1f4a60",
+      "recorded_at": "2026-09-12T18:29:24.880Z",
+      "provider": "espn",
+      "league_id": "99",
+      "season": 2026,
+      "scoring_period": 1,
+      "command": [
+        "fantasy-sports",
+        "lineup",
+        "set",
+        "--team",
+        "1"
+      ],
+      "member_id": "{00000000-0A47-F4CD-713D-FE2C76EB2524}",
+      "role": "creator",
+      "team_id": "1",
+      "kind": "lineup",
+      "reversible": true,
+      "prior_state": {
+        "9000013": 4,
+        "9000012": 20
+      },
+      "applied_state": {
+        "9000013": 20,
+        "9000012": 4
+      },
+      "request": {
+        "teamId": 1,
+        "type": "ROSTER",
+        "scoringPeriodId": 1,
+        "executionType": "EXECUTE",
+        "items": [
+          {
+            "playerId": 9000013,
+            "type": "LINEUP",
+            "fromLineupSlotId": 4,
+            "toLineupSlotId": 20
+          },
+          {
+            "playerId": 9000012,
+            "type": "LINEUP",
+            "fromLineupSlotId": 20,
+            "toLineupSlotId": 4
+          }
+        ]
+      },
+      "provider_transaction_id": "3b1f6c52-8d0e-4a47-9b6a-5c2e7d9f0a11",
+      "proposed_at": "2026-09-12T18:29:25.019Z",
+      "cost": {
+        "bid_amount": null,
+        "displaced_player_id": null
+      },
+      "status": "executed",
+      "reverses": null,
+      "error": null
+    }
+  ],
+  "error": null
+}
+```
+<!-- /sample -->
+
+### `journal show`
+
+One entry in full. `data` is the entry, with these fields:
+
+| Field | Meaning |
+|---|---|
+| `id`, `recorded_at` | A UUID, and when the intent was recorded (UTC) |
+| `provider`, `league_id`, `season`, `scoring_period` | What was written to |
+| `command` | The argv as invoked, redacted |
+| `member_id` | The acting member as ESPN's **response** echoed it, stored as a pseudonym; `null` until the write completes |
+| `role` | `creator`, `manager`, `member`, or `null`: the session's authority in that league |
+| `team_id`, `kind` | The team written, and `lineup`, `add`, `drop`, `claim`, `cancel`, or `reverse` |
+| `reversible` | Whether a reversal can be built from `prior_state` |
+| `prior_state`, `applied_state` | The slots before the request, and as read back after it |
+| `request` | The body sent |
+| `provider_transaction_id`, `proposed_at` | ESPN's own `id` and `proposedDate`, to join against its transaction log |
+| `cost` | `bid_amount` and `displaced_player_id` |
+| `status` | `pending`, `executed`, `rejected`, or `diverged` |
+| `reverses` | For a `reverse` entry, the id it undoes |
+| `error` | The error payload for a `rejected` or `diverged` entry |
+
+Credentials never reach the file: every string passes the redaction layer,
+and SWID GUIDs, including `member_id`, are stored as per-journal
+pseudonyms, stable across entries so "same member each time" can be read off
+the list.
+
+An unknown `--id` is `CONFIG_INVALID` with `details.kind` of `argument` and
+the nearest ids in `details.nearest`.
+
+<!-- sample: journal-show -->
+```bash
+fantasy-sports journal show --id 0f8a9c2e-6b1d-4e57-9a3c-2d7b5e1f4a60
+# synthetic league 99, season 2026 (replayed). Exit 0, stdout. A seeded journal: the write commands that fill it land after the store:
+```
+```json
+{
+  "schema": "fantasy-sports/v1",
+  "provider": null,
+  "league_id": null,
+  "season": null,
+  "generated_at": "2026-10-15T05:53:06Z",
+  "data_as_of": null,
+  "data_age_seconds": null,
+  "sources": [],
+  "untrusted": {},
+  "raw_omitted": false,
+  "data": {
+    "id": "0f8a9c2e-6b1d-4e57-9a3c-2d7b5e1f4a60",
+    "recorded_at": "2026-09-12T18:29:24.880Z",
+    "provider": "espn",
+    "league_id": "99",
+    "season": 2026,
+    "scoring_period": 1,
+    "command": [
+      "fantasy-sports",
+      "lineup",
+      "set",
+      "--team",
+      "1"
+    ],
+    "member_id": "{00000000-0A47-F4CD-713D-FE2C76EB2524}",
+    "role": "creator",
+    "team_id": "1",
+    "kind": "lineup",
+    "reversible": true,
+    "prior_state": {
+      "9000013": 4,
+      "9000012": 20
+    },
+    "applied_state": {
+      "9000013": 20,
+      "9000012": 4
+    },
+    "request": {
+      "teamId": 1,
+      "type": "ROSTER",
+      "scoringPeriodId": 1,
+      "executionType": "EXECUTE",
+      "items": [
+        {
+          "playerId": 9000013,
+          "type": "LINEUP",
+          "fromLineupSlotId": 4,
+          "toLineupSlotId": 20
+        },
+        {
+          "playerId": 9000012,
+          "type": "LINEUP",
+          "fromLineupSlotId": 20,
+          "toLineupSlotId": 4
+        }
+      ]
+    },
+    "provider_transaction_id": "3b1f6c52-8d0e-4a47-9b6a-5c2e7d9f0a11",
+    "proposed_at": "2026-09-12T18:29:25.019Z",
+    "cost": {
+      "bid_amount": null,
+      "displaced_player_id": null
+    },
+    "status": "executed",
+    "reverses": null,
+    "error": null
   },
   "error": null
 }

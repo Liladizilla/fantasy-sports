@@ -91,6 +91,21 @@
         }
       },
       {
+        "name": "journal",
+        "status": "ok",
+        "summary": "No journal yet at ~/.local/state/fantasy-sports/journal.sqlite; it is created by the first write.",
+        "details": {
+          "path": "~/.local/state/fantasy-sports/journal.sqlite",
+          "exists": false,
+          "entries": 0,
+          "pending": 0,
+          "pending_ids": [],
+          "file_mode": null,
+          "dir_mode": null,
+          "permissions_ok": true
+        }
+      },
+      {
         "name": "version",
         "status": "warn",
         "summary": "Could not reach the health manifest (offline, GitHub unreachable, or not yet published).",

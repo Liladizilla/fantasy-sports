@@ -10,6 +10,16 @@ football API, distributed via `uv tool install fantasy-sports`.
 
 ### Added
 
+- **Mutation journal store** — `core/journal.py` (standard library only): a
+  SQLite journal at `$XDG_STATE_HOME/fantasy-sports/journal.sqlite` (file
+  `0600`, directory `0700`) with a two-phase `begin` / `complete` | `reject` |
+  `diverge` API, so a crash between the intent and the outcome leaves a visible
+  `pending` row. Every string and key is redacted on the way in, and SWID GUIDs
+  (including the acting `member_id`) are stored as per-journal pseudonyms.
+  Adds `journal list [--league] [--limit] [--irreversible]` and
+  `journal show --id`, and a `journal` check in `doctor` that reports the path,
+  entry count, pending rows, and permissions without ever raising. `journal
+  reverse` waits for the write transport (#16, #107).
 - **`WRITE_REJECTED` and `WRITE_DIVERGED` error codes** — exits 11 and 12,
   both non-retryable. `WRITE_REJECTED` is one code with a closed
   `details.kind` (`roster_lock`, `slot_limit`, `same_slot`,

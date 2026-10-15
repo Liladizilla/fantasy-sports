@@ -10,6 +10,7 @@ tests that mean to exercise them clear it explicitly, same as
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from _harness import FAKE_S2, FAKE_SWID, RecordedEspn, install_espn, isolate_hom
 
 from fantasy_sports.commands import REGISTRY
 from fantasy_sports.commands.doctor import CheckStatus, doctor
+from fantasy_sports.core.errors import ConfigInvalidError
 from fantasy_sports.core.redaction import forget_secrets
 from fantasy_sports.health import client as health_client
 
@@ -27,6 +29,7 @@ CHECK_NAMES = {
     "config",
     "credentials",
     "cache",
+    "journal",
     "version",
     "provider_status",
     "leagues_reachable",
@@ -402,3 +405,116 @@ def test_leagues_reachable_is_skipped_with_no_leagues_configured(
     checks = _by_name(doctor(live=True))
     assert checks["leagues_reachable"]["status"] == "skipped"
     assert checks["leagues_reachable"]["summary"] == "No leagues configured."
+
+
+# --------------------------------------------------------------------------- #
+# journal
+# --------------------------------------------------------------------------- #
+
+
+def _journal_entry(**overrides: Any):
+    from fantasy_sports.core.journal import JournalEntry
+
+    base: dict[str, Any] = {
+        "provider": "espn",
+        "league_id": "99",
+        "season": 2026,
+        "command": ["fantasy-sports", "lineup", "set"],
+        "kind": "lineup",
+        "reversible": True,
+        "prior_state": {"1": 0},
+        "request": {"type": "LINEUP"},
+    }
+    base.update(overrides)
+    return JournalEntry(**base)
+
+
+def test_journal_check_is_ok_and_creates_nothing_when_no_journal_exists_yet():
+    from fantasy_sports.core.journal import journal_path
+
+    journal = _by_name(doctor())["journal"]
+    assert journal["status"] == "ok"
+    assert journal["details"]["exists"] is False
+    assert journal["details"]["entries"] == 0
+    assert journal["details"]["path"] == str(journal_path())
+    assert not journal_path().parent.exists()
+
+
+def test_journal_check_counts_a_healthy_journal():
+    from fantasy_sports.core.journal import Journal
+
+    with Journal.open() as store:
+        done = store.begin(_journal_entry())
+        store.reject(done.id, ConfigInvalidError("no"))
+    journal = _by_name(doctor())["journal"]
+    assert journal["status"] == "ok"
+    assert journal["details"]["entries"] == 1
+    assert journal["details"]["pending"] == 0
+    assert journal["details"]["permissions_ok"] is True
+    assert "1 entry" in journal["summary"]
+
+
+def test_journal_check_warns_about_pending_rows_and_names_them():
+    from fantasy_sports.core.journal import Journal
+
+    with Journal.open() as store:
+        stuck = store.begin(_journal_entry())
+        store.begin(_journal_entry())
+    journal = _by_name(doctor())["journal"]
+    assert journal["status"] == "warn"
+    assert journal["details"]["pending"] == 2
+    assert stuck.id in journal["details"]["pending_ids"]
+    assert "2 journal entries are pending" in journal["summary"]
+
+
+def test_journal_check_says_entry_in_the_singular_for_one_pending_row():
+    from fantasy_sports.core.journal import Journal
+
+    with Journal.open() as store:
+        store.begin(_journal_entry())
+    assert "1 journal entry is pending" in _by_name(doctor())["journal"]["summary"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
+def test_journal_check_warns_when_the_file_is_not_private():
+    from fantasy_sports.core.journal import Journal, journal_path
+
+    with Journal.open() as store:
+        done = store.begin(_journal_entry())
+        store.reject(done.id, ConfigInvalidError("no"))
+    journal_path().chmod(0o644)
+    journal = _by_name(doctor())["journal"]
+    assert journal["status"] == "warn"
+    assert journal["details"]["file_mode"] == "0644"
+    assert journal["details"]["permissions_ok"] is False
+    assert "not private" in journal["summary"]
+
+
+def test_journal_check_reports_a_corrupt_file_as_a_finding_not_a_crash():
+    from fantasy_sports.core.journal import journal_path
+
+    path = journal_path()
+    path.parent.mkdir(parents=True)
+    path.write_text("this is not a sqlite file")
+    envelope = doctor()
+    assert envelope.ok
+    journal = _by_name(envelope)["journal"]
+    assert journal["status"] == "fail"
+    assert journal["details"]["entries"] is None
+    assert "cannot be read" in journal["summary"]
+    assert path.read_text() == "this is not a sqlite file"
+    assert envelope.data["status"] == "fail"
+
+
+def test_journal_check_survives_the_inspection_itself_raising(monkeypatch: pytest.MonkeyPatch):
+    from fantasy_sports.core import journal as journal_module
+
+    def explode(self: Any) -> None:
+        raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr(journal_module.Journal, "health", explode)
+    envelope = doctor()
+    assert envelope.ok
+    journal = _by_name(envelope)["journal"]
+    assert journal["status"] == "fail"
+    assert "RuntimeError" in journal["summary"]

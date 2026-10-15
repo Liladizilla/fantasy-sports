@@ -424,7 +424,7 @@ register(
 register(
     CommandSpec(
         name="doctor",
-        summary="Run every health check: config, credentials, cache, version, provider status.",
+        summary="Run every health check: config, credentials, cache, journal, version, provider.",
         handler="fantasy_sports.commands.doctor:doctor",
         shape=DataShape.OBJECT,
         takes_league=False,
@@ -462,5 +462,58 @@ register(
         handler="fantasy_sports.commands.auth:logout",
         shape=DataShape.OBJECT,
         takes_league=False,
+    )
+)
+
+register(
+    CommandSpec(
+        name="list",
+        group="journal",
+        summary="List the mutation journal, newest first: each write, who made it, how it ended.",
+        handler="fantasy_sports.commands.journal:journal_list",
+        shape=DataShape.COLLECTION,
+        takes_league=False,
+        params=(
+            Param(
+                name="league",
+                help="Only entries for this league: a profile name from config.toml, or a "
+                "raw league id. Unlike read commands this filters; it does not select a target.",
+                annotation=str | None,
+                flags=("--league", "-l"),
+            ),
+            Param(
+                name="limit",
+                help="Most-recent entries to return.",
+                annotation=int,
+                default=25,
+            ),
+            Param(
+                name="irreversible",
+                help="Only entries that cannot be reversed (add, drop, claim): the ones a "
+                "human would have to undo by hand.",
+                annotation=bool,
+                default=False,
+            ),
+        ),
+    )
+)
+
+register(
+    CommandSpec(
+        name="show",
+        group="journal",
+        summary="Show one journal entry in full: prior and applied state, acting member, cost.",
+        handler="fantasy_sports.commands.journal:journal_show",
+        shape=DataShape.OBJECT,
+        takes_league=False,
+        params=(
+            Param(
+                name="id",
+                help="Entry id, as printed by `journal list`. An unknown id fails and "
+                "names the nearest ones.",
+                annotation=str,
+                required=True,
+            ),
+        ),
     )
 )

@@ -183,7 +183,9 @@ fails if a committed sample no longer matches what the code renders.
 | [`free-agents`](docs/commands.md#free-agents) | Unrostered players, optionally filtered to one position |
 | [`transactions`](docs/commands.md#transactions) | Recent roster moves, newest first |
 | [`raw`](docs/commands.md#raw) | One ESPN view passed straight through, payload unmodified |
-| [`doctor`](docs/commands.md#doctor) | Every health check: config, credentials, cache, version, provider status |
+| [`doctor`](docs/commands.md#doctor) | Every health check: config, credentials, cache, journal, version, provider status |
+| [`journal list`](docs/commands.md#journal-list) | The mutation journal, newest first: each write, who made it, how it ended |
+| [`journal show`](docs/commands.md#journal-show) | One journal entry in full: prior and applied state, acting member, cost |
 | [`auth status`](docs/commands.md#auth-status) | Which credentials are configured, from where, and how old |
 | [`auth login`](docs/commands.md#auth-login) | Store the two ESPN cookies in the Keychain, without echoing them |
 | [`auth logout`](docs/commands.md#auth-logout) | Remove them from the Keychain and `config.toml`; report what it cannot unset |
@@ -485,7 +487,7 @@ fantasy-sports doctor
 ```
 
 `doctor` checks your Python and dependency versions, config, credentials,
-local cache, and (with `--live`) whether each configured league is actually
+local cache, the mutation journal (and any write it never closed), and (with `--live`) whether each configured league is actually
 reachable, and reports one `ok`/`warn`/`error` status per check. A scheduled
 canary (`scripts/canary/`) separately hits ESPN's own public test league
 daily during the season and fails loudly the moment a response no longer

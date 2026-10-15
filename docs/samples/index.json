@@ -520,6 +520,32 @@
     "file": "auth-logout.json"
   },
   {
+    "name": "journal-list",
+    "command": "fantasy-sports journal list",
+    "source": "replayed",
+    "league": "synthetic league 99, season 2026",
+    "exit": 0,
+    "stream": "stdout",
+    "format": "json",
+    "trimmed": false,
+    "note": "A seeded journal: the write commands that fill it land after the store",
+    "offline": true,
+    "file": "journal-list.json"
+  },
+  {
+    "name": "journal-show",
+    "command": "fantasy-sports journal show --id 0f8a9c2e-6b1d-4e57-9a3c-2d7b5e1f4a60",
+    "source": "replayed",
+    "league": "synthetic league 99, season 2026",
+    "exit": 0,
+    "stream": "stdout",
+    "format": "json",
+    "trimmed": false,
+    "note": "A seeded journal: the write commands that fill it land after the store",
+    "offline": true,
+    "file": "journal-show.json"
+  },
+  {
     "name": "error-auth-expired",
     "command": "fantasy-sports standings",
     "source": "synthetic",

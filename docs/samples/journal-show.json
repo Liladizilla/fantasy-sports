@@ -1,0 +1,70 @@
+{
+  "schema": "fantasy-sports/v1",
+  "provider": null,
+  "league_id": null,
+  "season": null,
+  "generated_at": "2026-10-15T05:53:06Z",
+  "data_as_of": null,
+  "data_age_seconds": null,
+  "sources": [],
+  "untrusted": {},
+  "raw_omitted": false,
+  "data": {
+    "id": "0f8a9c2e-6b1d-4e57-9a3c-2d7b5e1f4a60",
+    "recorded_at": "2026-09-12T18:29:24.880Z",
+    "provider": "espn",
+    "league_id": "99",
+    "season": 2026,
+    "scoring_period": 1,
+    "command": [
+      "fantasy-sports",
+      "lineup",
+      "set",
+      "--team",
+      "1"
+    ],
+    "member_id": "{00000000-0A47-F4CD-713D-FE2C76EB2524}",
+    "role": "creator",
+    "team_id": "1",
+    "kind": "lineup",
+    "reversible": true,
+    "prior_state": {
+      "9000013": 4,
+      "9000012": 20
+    },
+    "applied_state": {
+      "9000013": 20,
+      "9000012": 4
+    },
+    "request": {
+      "teamId": 1,
+      "type": "ROSTER",
+      "scoringPeriodId": 1,
+      "executionType": "EXECUTE",
+      "items": [
+        {
+          "playerId": 9000013,
+          "type": "LINEUP",
+          "fromLineupSlotId": 4,
+          "toLineupSlotId": 20
+        },
+        {
+          "playerId": 9000012,
+          "type": "LINEUP",
+          "fromLineupSlotId": 20,
+          "toLineupSlotId": 4
+        }
+      ]
+    },
+    "provider_transaction_id": "3b1f6c52-8d0e-4a47-9b6a-5c2e7d9f0a11",
+    "proposed_at": "2026-09-12T18:29:25.019Z",
+    "cost": {
+      "bid_amount": null,
+      "displaced_player_id": null
+    },
+    "status": "executed",
+    "reverses": null,
+    "error": null
+  },
+  "error": null
+}

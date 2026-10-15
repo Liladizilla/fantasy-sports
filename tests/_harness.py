@@ -162,12 +162,13 @@ def isolate_home(tmp_path: Path, monkeypatch: Any) -> Path:
     developer's own ``config.toml`` and response cache from leaking into the
     run (``docs/memory/config-toml-is-a-shared-namespace.md``).
     """
-    for name in ("XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"):
+    for name in ("XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv("FANTASY_SPORTS_ESPN_S2", FAKE_S2)
     monkeypatch.setenv("FANTASY_SPORTS_SWID", FAKE_SWID)
 

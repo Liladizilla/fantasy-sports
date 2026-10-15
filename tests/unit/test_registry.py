@@ -41,6 +41,8 @@ V01_SURFACE = frozenset(
         "box-scores",
         "doctor",
         "free-agents",
+        "journal list",
+        "journal show",
         "league info",
         "matchups",
         "raw",
@@ -60,7 +62,9 @@ def test_the_v01_surface_is_registered_and_nothing_else_is():
     changed that command's data shape, which is a runtime contract. `doctor`
     is another, added for jwulff/fantasy-sports#10. `auth logout` is the
     third: `SECURITY.md` could not describe a leak remediation without it
-    (jwulff/fantasy-sports#62).
+    (jwulff/fantasy-sports#62). `journal list` and `journal show` are the
+    fourth and fifth, the read side of the mutation journal
+    (jwulff/fantasy-sports#16).
     """
     assert set(REGISTRY) == V01_SURFACE
 
