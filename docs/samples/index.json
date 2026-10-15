@@ -546,6 +546,19 @@
     "file": "journal-show.json"
   },
   {
+    "name": "journal-digest",
+    "command": "fantasy-sports journal digest --since 2026-09-12T00:00:00Z --irreversible",
+    "source": "replayed",
+    "league": "synthetic league 99, season 2026",
+    "exit": 0,
+    "stream": "stdout",
+    "format": "json",
+    "trimmed": false,
+    "note": "A seeded journal; the claim was begun and never closed, so it is still pending",
+    "offline": true,
+    "file": "journal-digest.json"
+  },
+  {
     "name": "error-auth-expired",
     "command": "fantasy-sports standings",
     "source": "synthetic",

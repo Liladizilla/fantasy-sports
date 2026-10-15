@@ -106,6 +106,15 @@
         }
       },
       {
+        "name": "notify",
+        "status": "ok",
+        "summary": "Notifications are off; set [notify] irreversible_command to be told about adds, drops, and claims.",
+        "details": {
+          "enabled": false,
+          "command_set": false
+        }
+      },
+      {
         "name": "version",
         "status": "warn",
         "summary": "Could not reach the health manifest (offline, GitHub unreachable, or not yet published).",

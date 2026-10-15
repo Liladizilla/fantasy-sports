@@ -10,6 +10,7 @@ tests that mean to exercise them clear it explicitly, same as
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -30,6 +31,7 @@ CHECK_NAMES = {
     "credentials",
     "cache",
     "journal",
+    "notify",
     "version",
     "provider_status",
     "leagues_reachable",
@@ -542,3 +544,49 @@ def test_journal_check_survives_the_inspection_itself_raising(monkeypatch: pytes
     journal = _by_name(envelope)["journal"]
     assert journal["status"] == "fail"
     assert "RuntimeError" in journal["summary"]
+
+
+# --------------------------------------------------------------------------- #
+# notify
+# --------------------------------------------------------------------------- #
+
+
+def _write_config(isolated_home: Path, extra: str) -> None:
+    path = isolated_home / "config" / "fantasy-sports" / "config.toml"
+    existing = path.read_text(encoding="utf-8")
+    # A bare key must come first or it would land inside the last table.
+    joined = existing + "\n" + extra if extra.startswith("[") else extra + "\n" + existing
+    path.write_text(joined, encoding="utf-8")
+
+
+def test_notify_check_is_ok_and_disabled_by_default():
+    check = _by_name(doctor())["notify"]
+    assert check["status"] == "ok"
+    assert check["details"] == {"enabled": False, "command_set": False}
+
+
+def test_notify_check_reports_a_configured_command_without_running_it(
+    isolated_home: Path, tmp_path: Path
+):
+    marker = tmp_path / "ran"
+    _write_config(isolated_home, f'[notify]\nirreversible_command = "touch {marker}"\n')
+    check = _by_name(doctor())["notify"]
+    assert check["status"] == "ok"
+    assert check["details"] == {"enabled": True, "command_set": True}
+    assert not marker.exists(), "doctor must never run the delivery command"
+    assert str(marker) not in json.dumps(check), "the command line stays out of the report"
+
+
+def test_notify_check_warns_on_a_blank_command(isolated_home: Path):
+    _write_config(isolated_home, '[notify]\nirreversible_command = "   "\n')
+    check = _by_name(doctor())["notify"]
+    assert check["status"] == "warn"
+    assert check["details"]["enabled"] is False
+
+
+@pytest.mark.parametrize("body", ['notify = "nope"', "[notify]\nirreversible_command = 3"])
+def test_notify_check_warns_instead_of_raising_on_a_malformed_table(isolated_home: Path, body: str):
+    _write_config(isolated_home, body)
+    envelope = doctor()
+    assert envelope.ok
+    assert _by_name(envelope)["notify"]["status"] == "warn"

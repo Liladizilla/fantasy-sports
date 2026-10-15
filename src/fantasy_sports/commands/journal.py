@@ -22,6 +22,8 @@ Nothing here imports typer (ADR-0003).
 
 from __future__ import annotations
 
+import re
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from fantasy_sports.commands.context import require_shape
@@ -30,7 +32,7 @@ from fantasy_sports.core.errors import ConfigInvalidError
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from fantasy_sports.output.envelope import Envelope
 
-__all__ = ["journal_list", "journal_show"]
+__all__ = ["journal_digest", "journal_list", "journal_show", "parse_since"]
 
 
 def journal_list(
@@ -101,6 +103,88 @@ def journal_show(*, id: str) -> Envelope:  # noqa: A002 - `--id` is the document
             )
     data = entry.to_dict()
     require_shape(data, command="journal show")
+    return Envelope.success(data=data)
+
+
+_DURATION = re.compile(r"(\d+)([mhd])")
+_UNITS = {"m": "minutes", "h": "hours", "d": "days"}
+
+
+def parse_since(text: str, *, now: datetime | None = None) -> datetime:
+    """A UTC instant from ``text``: a duration (``30m``, ``24h``, ``7d``) or an ISO-8601 timestamp.
+
+    A duration counts back from ``now`` (default: the present). A timestamp
+    must carry its offset (``2026-10-14T08:00:00Z``): a naive one would be
+    wrong by the host's UTC offset, so it is refused rather than guessed.
+    Anything else is ``CONFIG_INVALID`` with ``kind: "argument"``.
+    """
+    value = text.strip() if isinstance(text, str) else ""
+    match = _DURATION.fullmatch(value)
+    if match is not None:
+        amount = int(match.group(1))
+        try:
+            return (now or datetime.now(UTC)) - timedelta(**{_UNITS[match.group(2)]: amount})
+        except OverflowError:
+            pass  # a duration reaching before year 1 is not a duration: refused below
+    else:
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            parsed = None
+        if parsed is not None and parsed.tzinfo is not None and parsed.utcoffset() is not None:
+            return parsed.astimezone(UTC)
+    raise ConfigInvalidError(
+        f"--since must be a duration like 24h, 7d, or 30m, or a UTC timestamp like "
+        f"2026-10-14T08:00:00Z; got {text!r}.",
+        kind="argument",
+        remediation="Pass --since 24h, or --since with an ISO-8601 timestamp that ends in Z.",
+        details={"argument": "since", "value": text},
+    )
+
+
+def journal_digest(
+    *,
+    since: str,
+    irreversible: bool = False,
+    league: str | None = None,
+    limit: int = 100,
+) -> Envelope:
+    """Entries recorded at or after ``since``, newest first, for a consumer to render.
+
+    Built for a cron job or an agent that reports on the journal: run it on a
+    schedule with a window at least as long as the schedule, hand the output to
+    whatever tells John. ``--since`` is a duration (``24h``, ``7d``, ``30m``)
+    or an ISO-8601 timestamp with an offset (``2026-10-14T08:00:00Z``).
+    ``--irreversible`` keeps adds, drops, and claims. ``--league`` filters
+    exactly as it does for ``journal list``. ``data`` is a list of entry
+    mappings (see ``journal show``); an empty window is an empty list.
+
+    The window is on ``recorded_at``, when the entry was begun, so a write
+    begun before the window and closed inside it appears only in the earlier
+    window, with its final status. Overlap the windows and de-duplicate on
+    ``id`` if that matters. The envelope needs no provider, credential, or
+    league, exactly like ``journal list``.
+    """
+    from fantasy_sports.core.journal import Journal
+    from fantasy_sports.output.envelope import Envelope
+
+    cutoff = parse_since(since)
+    if limit < 1:
+        raise ConfigInvalidError(
+            f"--limit must be at least 1; got {limit}.",
+            kind="argument",
+            remediation="Pass --limit with a positive integer, e.g. --limit 100.",
+            details={"argument": "limit", "value": limit},
+        )
+    with Journal.open() as journal:
+        entries = journal.list(
+            league_id=_league_filter(league),
+            limit=limit,
+            irreversible_only=irreversible,
+            since=cutoff,
+        )
+    data: list[dict[str, Any]] = [entry.to_dict() for entry in entries]
+    require_shape(data, command="journal digest")
     return Envelope.success(data=data)
 
 

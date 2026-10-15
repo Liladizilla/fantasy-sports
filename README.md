@@ -185,6 +185,7 @@ fails if a committed sample no longer matches what the code renders.
 | [`raw`](docs/commands.md#raw) | One ESPN view passed straight through, payload unmodified |
 | [`doctor`](docs/commands.md#doctor) | Every health check: config, credentials, cache, journal, version, provider status |
 | [`journal list`](docs/commands.md#journal-list) | The mutation journal, newest first: each write, who made it, how it ended |
+| [`journal digest`](docs/commands.md#journal-digest) | Journal entries since a time, newest first, for a cron job or agent to report |
 | [`journal show`](docs/commands.md#journal-show) | One journal entry in full: prior and applied state, acting member, cost |
 | [`auth status`](docs/commands.md#auth-status) | Which credentials are configured, from where, and how old |
 | [`auth login`](docs/commands.md#auth-login) | Store the two ESPN cookies in the Keychain, without echoing them |
@@ -456,6 +457,40 @@ for game in matchups["data"]:
 ```
 
 Every field this loop reads is shown in the [command reference](docs/commands.md).
+
+### Being told about irreversible writes
+
+An add, a drop, or a claim cannot be undone by the tool, so you should not have
+to remember to look for one. Two pieces make that automatic, and neither knows
+where the news ends up.
+
+**Push.** Point `config.toml` at a command. The tool runs it once per
+irreversible write that took effect and writes the journal entry to its
+standard input as one line of JSON (already redacted, same fields as
+`journal show`):
+
+```toml
+[notify]
+irreversible_command = "/path/to/scripts/notify-irreversible-example.sh"
+```
+
+The command gets the environment unchanged and 20 seconds. A missing command,
+a non-zero exit, or a timeout is reported to the caller and never blocks or
+undoes the write. With no `[notify]` table, nothing runs. `doctor` shows
+whether it is set, without running it.
+[`scripts/notify-irreversible-example.sh`](scripts/notify-irreversible-example.sh)
+appends one line per write to `$XDG_STATE_HOME/fantasy-sports/irreversible.log`.
+
+**Pull.** [`journal digest`](docs/commands.md#journal-digest) lists what was
+recorded in a window, for a cron job or an agent to render:
+
+```bash
+fantasy-sports journal digest --since 24h --irreversible
+```
+
+Delivery to anything of your own, such as a task in a tracker or an entry in a
+notes vault, is a script of yours behind `irreversible_command` or after
+`journal digest`. It is deliberately not part of this package.
 
 ## Credentials
 

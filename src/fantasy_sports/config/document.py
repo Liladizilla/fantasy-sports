@@ -25,10 +25,28 @@ from __future__ import annotations
 import os
 import stat
 import tempfile
+import tomllib
 from pathlib import Path
 from typing import Any
 
-__all__ = ["write_atomically"]
+from fantasy_sports.core.errors import ConfigInvalidError
+
+__all__ = ["read_document", "write_atomically"]
+
+
+def read_document(path: Path) -> dict[str, Any]:
+    """The whole file as parsed TOML; a missing file is an empty document.
+
+    A file that will not parse or cannot be read is ``CONFIG_INVALID``.
+    """
+    try:
+        return tomllib.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigInvalidError(f"{path} is not valid TOML: {exc}") from exc
+    except OSError as exc:
+        raise ConfigInvalidError(f"{path} could not be read: {exc}") from exc
 
 
 def write_atomically(target: Path, document: dict[str, Any]) -> None:

@@ -684,7 +684,7 @@ Commands:
   box-scores    List both lineups for a week's matchups, player by player, with projections.
   doctor        Run every health check: config, credentials, cache, journal, version, provider.
   free-agents   List unrostered players, optionally filtered to one position.
-  journal       2 subcommands: list, show
+  journal       3 subcommands: digest, list, show
   league        1 subcommand: info
   matchups      List head-to-head pairings for a week, with both ESPN period identifiers.
   raw           Pass a view straight through to ESPN and return its payload unmodified.
@@ -1829,7 +1829,8 @@ fantasy-sports raw --view kona_player_info --filter '{"players":{"limit":2,"sort
 ### `doctor`
 
 Every health check in one report, cheapest and most fixable first. `python`,
-`config`, `credentials`, `cache`, and `journal` never leave the machine. `version` and
+`config`, `credentials`, `cache`, `journal`, and `notify` never leave the machine. `notify`
+reports whether `[notify] irreversible_command` is set; it never runs the command. `version` and
 `provider_status` fetch the project's public health manifest (skipped with
 `FANTASY_SPORTS_NO_HEALTH_CHECK=1`). `leagues_reachable` touches ESPN only
 with `--live`. `data.status` is the worst individual check; `data.ok` is the
@@ -1951,6 +1952,15 @@ fantasy-sports doctor
           "file_mode": null,
           "dir_mode": null,
           "permissions_ok": true
+        }
+      },
+      {
+        "name": "notify",
+        "status": "ok",
+        "summary": "Notifications are off; set [notify] irreversible_command to be told about adds, drops, and claims.",
+        "details": {
+          "enabled": false,
+          "command_set": false
         }
       },
       {
@@ -2403,6 +2413,96 @@ fantasy-sports journal list
         "displaced_player_id": null
       },
       "status": "executed",
+      "reverses": null,
+      "error": null
+    }
+  ],
+  "error": null
+}
+```
+<!-- /sample -->
+
+### `journal digest`
+
+The journal entries recorded since a point in time, newest first, in the
+standard envelope. It is the pull half of being told about irreversible writes
+(jwulff/fantasy-sports#113): a cron job or an agent runs it on a schedule and
+hands the result to whatever delivers news to the owner. The push half is the
+`[notify]` hook in the [README](../README.md#being-told-about-irreversible-writes).
+
+Like `journal list` it reads a local file: no league is resolved, no credential
+is needed, and the envelope's `provider`, `league_id`, and `season` are `null`.
+An empty window is an empty list.
+
+`--since` is required. It is either a duration counted back from now (`30m`,
+`24h`, `7d`) or an ISO-8601 timestamp that carries its offset
+(`2026-10-14T08:00:00Z`). A timestamp without an offset, or anything else, is
+`CONFIG_INVALID` with `details.argument` of `since`. The window is on
+`recorded_at`, when the entry was begun, so a write begun before the window and
+closed inside it shows up only in the earlier window, with its final status.
+Overlap the windows and de-duplicate on `id` when that matters.
+
+| Option | |
+|---|---|
+| `--since` | Start of the window: a duration (`24h`, `7d`, `30m`) or an ISO-8601 UTC timestamp. Required |
+| `--irreversible` | Only entries that cannot be reversed (`add`, `drop`, `claim`) |
+| `--league`, `-l` | Only entries for this league: a profile name from `config.toml`, or a raw league id. A filter, not a target |
+| `--limit` | Most-recent entries to return. Default 100; below 1 is `CONFIG_INVALID` |
+
+<!-- sample: journal-digest -->
+```bash
+fantasy-sports journal digest --since 2026-09-12T00:00:00Z --irreversible
+# synthetic league 99, season 2026 (replayed). Exit 0, stdout. A seeded journal; the claim was begun and never closed, so it is still pending:
+```
+```json
+{
+  "schema": "fantasy-sports/v1",
+  "provider": null,
+  "league_id": null,
+  "season": null,
+  "generated_at": "2026-10-15T06:17:37Z",
+  "data_as_of": null,
+  "data_age_seconds": null,
+  "sources": [],
+  "untrusted": {},
+  "raw_omitted": false,
+  "data": [
+    {
+      "id": "c47d19ab-52e0-4f3c-8a16-9e0b3d7a2c55",
+      "recorded_at": "2026-09-12T18:33:40.215Z",
+      "provider": "espn",
+      "league_id": "99",
+      "season": 2026,
+      "scoring_period": 1,
+      "command": [
+        "fantasy-sports",
+        "claim",
+        "--team",
+        "1",
+        "--bid",
+        "7"
+      ],
+      "member_id": null,
+      "role": "creator",
+      "team_id": "1",
+      "kind": "claim",
+      "reversible": false,
+      "prior_state": {
+        "9000012": 4
+      },
+      "applied_state": null,
+      "request": {
+        "teamId": 1,
+        "type": "WAIVER",
+        "bidAmount": 7
+      },
+      "provider_transaction_id": null,
+      "proposed_at": null,
+      "cost": {
+        "bid_amount": 7,
+        "displaced_player_id": "9000012"
+      },
+      "status": "pending",
       "reverses": null,
       "error": null
     }

@@ -500,6 +500,46 @@ register(
 
 register(
     CommandSpec(
+        name="digest",
+        group="journal",
+        summary="Journal entries since a time, newest first, for a cron job or agent to report.",
+        handler="fantasy_sports.commands.journal:journal_digest",
+        shape=DataShape.COLLECTION,
+        takes_league=False,
+        params=(
+            Param(
+                name="since",
+                help="Start of the window: a duration (24h, 7d, 30m) or an ISO-8601 UTC "
+                "timestamp (2026-10-14T08:00:00Z). Entries recorded at or after it.",
+                annotation=str,
+                required=True,
+            ),
+            Param(
+                name="irreversible",
+                help="Only entries that cannot be reversed (add, drop, claim): the ones a "
+                "human would have to undo by hand.",
+                annotation=bool,
+                default=False,
+            ),
+            Param(
+                name="league",
+                help="Only entries for this league: a profile name from config.toml, or a "
+                "raw league id. Filters; it does not select a target.",
+                annotation=str | None,
+                flags=("--league", "-l"),
+            ),
+            Param(
+                name="limit",
+                help="Most-recent entries to return.",
+                annotation=int,
+                default=100,
+            ),
+        ),
+    )
+)
+
+register(
+    CommandSpec(
         name="show",
         group="journal",
         summary="Show one journal entry in full: prior and applied state, acting member, cost.",

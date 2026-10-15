@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -119,6 +120,121 @@ def test_list_league_still_works_when_config_toml_is_broken(isolated_home: Path)
     (isolated_home / "config" / "fantasy-sports" / "config.toml").write_text("not = [valid")
     (entry,) = _seed(_entry(league_id="99"))
     assert [r["id"] for r in _call("journal list", league="99").data] == [entry.id]
+
+
+# --------------------------------------------------------------------------- #
+# journal digest
+# --------------------------------------------------------------------------- #
+
+
+def _seed_at(*moments: str, **overrides: Any) -> list[JournalEntry]:
+    return _seed(*(_entry(recorded_at=datetime.fromisoformat(m), **overrides) for m in moments))
+
+
+def test_digest_is_registered_as_a_leagueless_collection():
+    spec = REGISTRY["journal digest"]
+    assert spec.shape is DataShape.COLLECTION and not spec.takes_league
+    assert spec.group == "journal"
+    assert [p.name for p in spec.params] == ["since", "irreversible", "league", "limit"]
+    assert spec.params[0].required
+
+
+def test_digest_keeps_entries_at_or_after_a_timestamp_newest_first():
+    old, edge, new = _seed_at(
+        "2026-10-14T07:59:59.999Z", "2026-10-14T08:00:00Z", "2026-10-14T09:30:00Z"
+    )
+    data = _call("journal digest", since="2026-10-14T08:00:00Z").data
+    assert [row["id"] for row in data] == [new.id, edge.id]
+    assert old.id not in {row["id"] for row in data}
+    assert data[0] == new.to_dict()
+
+
+def test_digest_accepts_an_offset_timestamp_and_normalizes_it_to_utc():
+    early, late = _seed_at("2026-10-14T12:59:00Z", "2026-10-14T13:01:00Z")
+    data = _call("journal digest", since="2026-10-14T06:00:00-07:00").data
+    assert [row["id"] for row in data] == [late.id]
+    assert early.id not in {row["id"] for row in data}
+
+
+def test_digest_cutoff_rounds_up_to_the_stored_millisecond():
+    """The file keeps milliseconds; a cutoff between two must not admit the earlier one."""
+    (entry,) = _seed_at("2026-10-14T08:00:00.000Z")
+    ids = lambda since: [r["id"] for r in _call("journal digest", since=since).data]  # noqa: E731
+    assert ids("2026-10-14T08:00:00.000999Z") == []
+    assert ids("2026-10-14T08:00:00.000001Z") == []
+    assert ids("2026-10-14T08:00:00.000Z") == [entry.id]
+    assert ids("2026-10-14T07:59:59.999001Z") == [entry.id]
+
+
+def test_digest_a_duration_counts_back_from_now():
+    now = datetime.now(UTC)
+    stale, fresh = _seed(
+        _entry(recorded_at=now - timedelta(hours=30)), _entry(recorded_at=now - timedelta(hours=2))
+    )
+    assert [r["id"] for r in _call("journal digest", since="24h").data] == [fresh.id]
+    assert {r["id"] for r in _call("journal digest", since="2d").data} == {stale.id, fresh.id}
+    assert _call("journal digest", since="30m").data == []
+
+
+def test_digest_irreversible_league_and_limit_filters():
+    mine, reversible, other_league, newest = _seed(
+        _entry(kind="drop", reversible=False),
+        _entry(),
+        _entry(kind="add", reversible=False, league_id="12345"),
+        _entry(kind="claim", reversible=False),
+    )
+    ids = lambda **kw: [r["id"] for r in _call("journal digest", since="1d", **kw).data]  # noqa: E731
+    assert reversible.id not in ids(irreversible=True)
+    assert ids(irreversible=True, league="synthetic") == [newest.id, mine.id]
+    assert ids(league="12345") == [other_league.id]
+    assert ids(limit=1) == [newest.id]
+
+
+def test_digest_on_a_machine_with_no_journal_is_empty_and_creates_nothing():
+    envelope = _call("journal digest", since="7d")
+    assert envelope.ok and envelope.data == []
+    assert not journal_path().parent.exists()
+
+
+def test_digest_envelope_names_no_provider_league_or_season():
+    envelope = _call("journal digest", since="7d")
+    assert (envelope.provider, envelope.league_id, envelope.season) == (None, None, None)
+
+
+@pytest.mark.parametrize(
+    "since", ["", "yesterday", "24", "h", "-1d", "1.5h", "2026-10-14T08:00:00", "2026-13-45", "1w"]
+)
+def test_digest_refuses_anything_that_is_not_a_duration_or_an_aware_timestamp(since: str):
+    with pytest.raises(ConfigInvalidError) as caught:
+        _call("journal digest", since=since)
+    assert caught.value.kind == "argument"
+    assert caught.value.details["argument"] == "since"
+    assert caught.value.details["value"] == since
+
+
+def test_digest_rejects_an_absurd_duration_as_a_bad_argument():
+    with pytest.raises(ConfigInvalidError) as caught:
+        _call("journal digest", since="99999999999d")
+    assert caught.value.details["argument"] == "since"
+
+
+@pytest.mark.parametrize("limit", [0, -3])
+def test_digest_rejects_a_non_positive_limit(limit: int):
+    with pytest.raises(ConfigInvalidError) as caught:
+        _call("journal digest", since="1d", limit=limit)
+    assert caught.value.details["argument"] == "limit"
+
+
+def test_the_cli_projects_digest(capsys: pytest.CaptureFixture[str]):
+    (entry,) = _seed(_entry(kind="drop", reversible=False))
+    assert run(["journal", "digest", "--since", "1h", "--irreversible"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [row["id"] for row in payload["data"]] == [entry.id]
+
+
+def test_the_cli_reports_a_bad_since_on_stderr(capsys: pytest.CaptureFixture[str]):
+    assert run(["journal", "digest", "--since", "soon"]) != 0
+    assert json.loads(capsys.readouterr().err)["error"]["code"] == "CONFIG_INVALID"
 
 
 @pytest.mark.parametrize("limit", [0, -3])

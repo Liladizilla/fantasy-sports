@@ -5,10 +5,10 @@ it starts guessing: one call that answers "config parses, credentials are
 present and not stale, the cache is reachable, and here is what upstream looks
 like" without touching ESPN unless asked to.
 
-**Eight checks, five of them free.** ``python``, ``config``, ``credentials``,
-``cache``, and ``journal`` never leave the machine. ``version`` and ``provider_status`` make the
-one network call ARCHITECTURE §11.3 calls "forced, ignores cache" — a 2-second,
-unauthenticated ``GET`` of the public health manifest
+**Nine checks, six of them free.** ``python``, ``config``, ``credentials``,
+``cache``, ``journal``, and ``notify`` never leave the machine. ``version`` and
+``provider_status`` make the one network call ARCHITECTURE §11.3 calls "forced,
+ignores cache" — a 2-second, unauthenticated ``GET`` of the public health manifest
 (:mod:`fantasy_sports.health.client`), skipped entirely when the user opted
 out. ``leagues_reachable`` is the only check that can touch ESPN, and only
 when ``--live`` is passed: an agent-native ``doctor`` that silently spent a
@@ -103,6 +103,7 @@ def doctor(*, live: bool = False) -> Envelope:
         _credentials_check(),
         _cache_check(),
         _journal_check(),
+        _notify_check(),
         *_health_checks(current_version=__version__),
         _leagues_reachable_check(live=live),
     ]
@@ -361,6 +362,50 @@ def _journal_check() -> DoctorCheck:
         summary=f"Journal reachable: {health.entries} entr{'y' if health.entries == 1 else 'ies'}, "
         f"none pending, at {health.path}.",
         details=details,
+    )
+
+
+def _notify_check() -> DoctorCheck:
+    """Is irreversible-write notification configured, and is the command non-blank?
+
+    Reads ``[notify]`` from ``config.toml`` and nothing else. It does **not**
+    run the command: a health check that fired the owner's delivery script would
+    announce a write that never happened. Disabled is ``ok`` (the default); an
+    unreadable table is ``warn``, because John may believe he will be told when
+    he will not (jwulff/fantasy-sports#113).
+    """
+    from fantasy_sports.config import notify as config_notify
+
+    try:
+        config = config_notify.load()
+    except Exception as exc:  # noqa: BLE001 - a check reports; it never crashes doctor
+        return DoctorCheck(
+            name="notify",
+            status=CheckStatus.WARN,
+            summary="[notify] in config.toml could not be read, so irreversible writes "
+            "will not be announced: " + getattr(exc, "message", type(exc).__name__),
+            details={"enabled": False},
+        )
+    if config.irreversible_command is None:
+        return DoctorCheck(
+            name="notify",
+            status=CheckStatus.OK,
+            summary="Notifications are off; set [notify] irreversible_command to be told "
+            "about adds, drops, and claims.",
+            details={"enabled": False, "command_set": False},
+        )
+    if not config.enabled:
+        return DoctorCheck(
+            name="notify",
+            status=CheckStatus.WARN,
+            summary="[notify] irreversible_command is blank, so nothing will be announced.",
+            details={"enabled": False, "command_set": False},
+        )
+    return DoctorCheck(
+        name="notify",
+        status=CheckStatus.OK,
+        summary="Irreversible writes are announced to the configured command (not run by doctor).",
+        details={"enabled": True, "command_set": True},
     )
 
 

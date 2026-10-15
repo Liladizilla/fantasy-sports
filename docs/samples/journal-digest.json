@@ -1,0 +1,54 @@
+{
+  "schema": "fantasy-sports/v1",
+  "provider": null,
+  "league_id": null,
+  "season": null,
+  "generated_at": "2026-10-15T06:17:37Z",
+  "data_as_of": null,
+  "data_age_seconds": null,
+  "sources": [],
+  "untrusted": {},
+  "raw_omitted": false,
+  "data": [
+    {
+      "id": "c47d19ab-52e0-4f3c-8a16-9e0b3d7a2c55",
+      "recorded_at": "2026-09-12T18:33:40.215Z",
+      "provider": "espn",
+      "league_id": "99",
+      "season": 2026,
+      "scoring_period": 1,
+      "command": [
+        "fantasy-sports",
+        "claim",
+        "--team",
+        "1",
+        "--bid",
+        "7"
+      ],
+      "member_id": null,
+      "role": "creator",
+      "team_id": "1",
+      "kind": "claim",
+      "reversible": false,
+      "prior_state": {
+        "9000012": 4
+      },
+      "applied_state": null,
+      "request": {
+        "teamId": 1,
+        "type": "WAIVER",
+        "bidAmount": 7
+      },
+      "provider_transaction_id": null,
+      "proposed_at": null,
+      "cost": {
+        "bid_amount": 7,
+        "displaced_player_id": "9000012"
+      },
+      "status": "pending",
+      "reverses": null,
+      "error": null
+    }
+  ],
+  "error": null
+}

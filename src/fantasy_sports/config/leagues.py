@@ -43,7 +43,6 @@ is the point: ``LEAGUE_NOT_FOUND`` tells an agent to retry with a different
 
 from __future__ import annotations
 
-import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -51,7 +50,7 @@ from types import MappingProxyType
 from typing import Any
 
 from fantasy_sports.config import paths
-from fantasy_sports.config.document import write_atomically
+from fantasy_sports.config.document import read_document, write_atomically
 from fantasy_sports.core.errors import ConfigInvalidError, LeagueNotFoundError
 
 DEFAULT_SPORT = "football"
@@ -187,14 +186,7 @@ def save(config: LeagueConfig, path: Path | None = None) -> Path:
 
 def _read_document(path: Path) -> dict[str, Any]:
     """The whole file as parsed TOML; a missing file is an empty document."""
-    try:
-        return tomllib.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return {}
-    except tomllib.TOMLDecodeError as exc:
-        raise ConfigInvalidError(f"{path} is not valid TOML: {exc}") from exc
-    except OSError as exc:
-        raise ConfigInvalidError(f"{path} could not be read: {exc}") from exc
+    return read_document(path)
 
 
 def _parse(raw: dict[str, Any], path: Path) -> LeagueConfig:

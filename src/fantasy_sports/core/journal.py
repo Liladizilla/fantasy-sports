@@ -72,7 +72,7 @@ import re
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
@@ -195,6 +195,17 @@ def _iso(value: datetime) -> str:
         )
     utc = value.astimezone(UTC)
     return utc.strftime("%Y-%m-%dT%H:%M:%S.") + f"{utc.microsecond // 1000:03d}Z"
+
+
+def _ceil_to_millisecond(value: datetime) -> datetime:
+    """``value`` rounded *up* to the millisecond the file stores.
+
+    :func:`_iso` truncates, which is right for a stored timestamp but wrong for
+    a ``>=`` cutoff: a cutoff of ``.000999Z`` would truncate to ``.000Z`` and
+    admit an entry that predates it.
+    """
+    extra = value.microsecond % 1000
+    return value if extra == 0 else value + timedelta(microseconds=1000 - extra)
 
 
 def _parse(text: str | None) -> datetime | None:
@@ -525,8 +536,14 @@ class Journal:
         league_id: str | None = None,
         limit: int = 25,
         irreversible_only: bool = False,
+        since: datetime | None = None,
     ) -> list[JournalEntry]:
-        """Newest first. ``irreversible_only`` keeps entries with ``reversible`` false."""
+        """Newest first. ``irreversible_only`` keeps entries with ``reversible`` false.
+
+        ``since`` keeps entries recorded at or after that moment. It must be
+        timezone-aware (a naive datetime is a ``ValueError``, as everywhere in
+        this module); the comparison is on the stored UTC millisecond text.
+        """
         if limit < 1:
             raise ValueError("limit must be at least 1")
         clauses: list[str] = []
@@ -536,6 +553,9 @@ class Journal:
             params.append(league_id)
         if irreversible_only:
             clauses.append("reversible = 0")
+        if since is not None:
+            clauses.append("recorded_at >= ?")
+            params.append(_iso(_ceil_to_millisecond(since)))
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         return self._select(where, params, limit=limit)
 
