@@ -1,4 +1,4 @@
-"""``journal list`` and ``journal show`` — read-only views of the mutation journal.
+"""``journal list``, ``journal show``, and ``journal reverse``.
 
 The journal (:mod:`fantasy_sports.core.journal`) records every write this tool
 makes: what it was about to change, who ESPN says made the change, and how it
@@ -15,7 +15,12 @@ has been written. A journal that exists but cannot be read is an error, because
 reporting it empty would be a lie about an audit trail
 (``core/journal.py``).
 
-``journal reverse`` is not here. It needs the write transport (#107).
+``journal reverse`` is the one that writes. For a lineup entry it sends the
+inverse target — every player back to the slot ``prior_state`` recorded —
+through the same flow as ``lineup set`` (preflight, journal, send, read back),
+journaled as a new ``reverse`` entry whose ``reverses`` names the original. An
+add, drop, claim, or cancel cannot be undone by the tool, so reversing one is
+``NOT_AVAILABLE`` and nothing is sent.
 
 Nothing here imports typer (ADR-0003).
 """
@@ -27,12 +32,12 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from fantasy_sports.commands.context import require_shape
-from fantasy_sports.core.errors import ConfigInvalidError
+from fantasy_sports.core.errors import ConfigInvalidError, NotAvailableError
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from fantasy_sports.output.envelope import Envelope
 
-__all__ = ["journal_digest", "journal_list", "journal_show", "parse_since"]
+__all__ = ["journal_digest", "journal_list", "journal_reverse", "journal_show", "parse_since"]
 
 
 def journal_list(
@@ -104,6 +109,125 @@ def journal_show(*, id: str) -> Envelope:  # noqa: A002 - `--id` is the document
     data = entry.to_dict()
     require_shape(data, command="journal show")
     return Envelope.success(data=data)
+
+
+#: What a human would have to do instead, for each kind the tool cannot undo.
+_IRREVERSIBLE_REMEDIATION: dict[str, str] = {
+    "add": "An add cannot be undone by the tool. To reverse it, drop the player yourself "
+    "in the ESPN app (or with `drop` once it ships); they may then sit on waivers.",
+    "drop": "A drop cannot be undone by the tool. The player is on waivers or a free agent; "
+    "re-acquiring them is a new add or claim, decided by a human.",
+    "claim": "A claim cannot be undone by the tool. If it is still pending, cancel it in the "
+    "ESPN app; if it processed, dropping the player is a new, irreversible decision.",
+    "cancel": "A cancelled claim cannot be restored. Resubmitting it is a new claim, decided "
+    "by a human.",
+}
+
+_REVERSIBLE_KINDS = ("lineup", "reverse")
+_REVERSIBLE_STATUSES = ("executed", "diverged")
+
+
+def journal_reverse(*, id: str, dry_run: bool = False) -> Envelope:  # noqa: A002 - `--id`
+    """Undo one lineup entry by moving every player back to their recorded slot.
+
+    Only ``lineup`` and ``reverse`` entries that ESPN executed (or executed and
+    read back differently) can be reversed. The inverse target is the entry's
+    ``prior_state``; it goes through the same preflight, journal, send, and
+    read-back as ``lineup set``, against the league the entry names, and is
+    journaled as kind ``reverse`` with ``reverses`` set. A player now locked
+    is refused before sending, or by ESPN as ``WRITE_REJECTED`` kind
+    ``roster_lock``; one transaction never half-applies.
+
+    An add, drop, claim, or cancel is ``NOT_AVAILABLE`` without sending
+    anything, with what a human would have to do instead. A ``pending`` or
+    ``rejected`` entry is ``CONFIG_INVALID``: nothing is known to have applied.
+
+    ``data`` is the ``lineup set`` mapping with ``kind: "reverse"`` and
+    ``reverses``.
+    """
+    from fantasy_sports.core.journal import Journal
+
+    with Journal.open() as journal:
+        entry = journal.get(id)
+        nearest = [] if entry is not None else journal.nearest_ids(id)
+    if entry is None:
+        raise ConfigInvalidError(
+            f"No journal entry with id {id!r}."
+            + (f" Nearest ids: {', '.join(nearest)}." if nearest else " The journal is empty."),
+            kind="argument",
+            remediation="Run `fantasy-sports journal list` to see the ids on record.",
+            details={"argument": "id", "value": id, "nearest": nearest},
+        )
+    if entry.kind in _IRREVERSIBLE_REMEDIATION or not entry.reversible:
+        raise NotAvailableError(
+            f"Journal entry {id} is a {entry.kind!r}, which this tool cannot reverse. "
+            "Nothing was sent.",
+            remediation=_IRREVERSIBLE_REMEDIATION.get(
+                entry.kind, "Undo it by hand in the ESPN app."
+            ),
+            details={"id": id, "kind": entry.kind, "reversible": entry.reversible},
+        )
+    if entry.kind not in _REVERSIBLE_KINDS or entry.status not in _REVERSIBLE_STATUSES:
+        raise ConfigInvalidError(
+            f"Journal entry {id} is {entry.status!r}; only an executed or diverged lineup "
+            "change can be reversed.",
+            kind="argument",
+            remediation=(
+                "A rejected entry changed nothing. A pending one has an unknown outcome: read "
+                "`fantasy-sports roster` and `transactions` first, then set the lineup "
+                "explicitly with `lineup set`."
+            ),
+            details={"id": id, "kind": entry.kind, "status": entry.status},
+        )
+    target = {str(player): str(slot) for player, slot in dict(entry.prior_state).items()}
+    if not target or entry.team_id is None:
+        raise ConfigInvalidError(
+            f"Journal entry {id} records no prior lineup to restore.",
+            kind="argument",
+            remediation="Set the lineup explicitly with `fantasy-sports lineup set`.",
+            details={"id": id},
+        )
+
+    from fantasy_sports.commands.context import open_read, success
+    from fantasy_sports.commands.lineup import execute_lineup
+
+    ctx = open_read(_profile_for(entry.provider, entry.league_id), entry.season, fresh=True)
+    roster = ctx.provider.fetch_roster(*ctx.target, entry.team_id)
+    command = ["fantasy-sports", "journal", "reverse", "--id", id]
+    if dry_run:
+        command.append("--dry-run")
+    data = execute_lineup(
+        ctx,
+        entry.team_id,
+        target,
+        roster=roster,
+        command=command,
+        dry_run=dry_run,
+        kind="reverse",
+        reverses=entry.id,
+    )
+    return success(ctx, data, command="journal reverse")
+
+
+def _profile_for(provider: str, league_id: str) -> str:
+    """The configured profile name for a journaled league.
+
+    The journal records the league id; ``open_read`` takes a profile name,
+    because credentials and the provider come from it. A league no longer in
+    ``config.toml`` cannot be written to, and says so.
+    """
+    from fantasy_sports.config import leagues as config_leagues
+
+    for name, profile in sorted(config_leagues.load().profiles_by_name.items()):
+        if profile.league_id == league_id and profile.provider.lower() == provider.lower():
+            return name
+    raise ConfigInvalidError(
+        f"No league profile in config.toml points at {provider} league {league_id}, which "
+        "the journal entry names.",
+        kind="config",
+        remediation=f'Add a [leagues.<name>] profile with league_id = "{league_id}" and retry.',
+        details={"provider": provider, "league_id": league_id},
+    )
 
 
 _DURATION = re.compile(r"(\d+)([mhd])")

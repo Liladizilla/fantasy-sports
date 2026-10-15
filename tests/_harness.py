@@ -176,3 +176,148 @@ def isolate_home(tmp_path: Path, monkeypatch: Any) -> Path:
     config.mkdir(parents=True, exist_ok=True)
     (config / "config.toml").write_text(CONFIG_TOML, encoding="utf-8")
     return tmp_path
+
+
+# --------------------------------------------------------------------------- #
+# Writes (jwulff/fantasy-sports#15)
+# --------------------------------------------------------------------------- #
+
+#: Before every week-2 kickoff in the synthetic league (the earliest is
+#: 2026-09-13 17:00 UTC), so no synthetic player reads as locked.
+UNLOCKED_AT = "2026-09-10T12:00:00+00:00"
+
+WRITE_CAPTURES = Path(__file__).resolve().parents[1] / "docs" / "research" / "05-espn-write-surface"
+
+#: Fixed so a write's success payload is byte-stable across runs.
+TRANSACTION_ID = "5d0c6e2a-7f41-4b9e-a3c8-1e6f2b9d4a70"
+PROPOSED_DATE_MS = 1789041601000  # 2026-09-10T12:00:01Z, a second after UNLOCKED_AT
+
+
+def writable_nav(swid: str = FAKE_SWID) -> dict[str, Any]:
+    """An ``mNav`` in which ``swid`` founded the league and owns team 1.
+
+    No cassette records ``mNav``; brief §7 is its shape.
+    """
+    return {
+        "members": [
+            {"id": swid, "isLeagueCreator": True, "isLeagueManager": False},
+            {"id": "{OWNER-BRAVO}", "isLeagueCreator": False, "isLeagueManager": False},
+        ],
+        "teams": [{"id": 1, "owners": [swid]}, {"id": 2, "owners": ["{OWNER-BRAVO}"]}],
+    }
+
+
+class WritableEspn(RecordedEspn):
+    """The synthetic league, plus a write host that changes what reads return.
+
+    Install with :func:`install_writable_espn`. Reads replay the cassette
+    exactly as :class:`RecordedEspn` does, except that the bootstrap's rosters
+    (and the adapter's standalone ``mRoster``) reflect every POST answered
+    ``"apply"``. ``mode`` picks the answer to the next POST:
+
+    * ``"apply"`` — 200 ``EXECUTED``, shaped like ``p3-swap-execute``, and the
+      items are applied to the rosters, so a read-back verifies;
+    * ``"ignore"`` — the same 200, but nothing changes, so a read-back diverges;
+    * ``"reject"`` — ``p8-locked-player-move``'s 409 ``TRAN_LINEUP_LOCKED``.
+
+    ``posts`` records every request body sent. ``echo_member`` replaces the
+    ``memberId`` ESPN echoes, to play a write applied as another account.
+    """
+
+    def __init__(
+        self, *, swid: str = FAKE_SWID, mode: str = "apply", echo_member: str | None = None
+    ) -> None:
+        super().__init__()
+        self.mode = mode
+        self.echo_member = echo_member
+        self.posts: list[dict[str, Any]] = []
+        self._bootstrap_key = next(
+            key
+            for key in self.bodies
+            if ("view", "mTeam") in key[1] and ("view", "mRoster") in key[1]
+        )
+        self.overrides["mNav"] = writable_nav(swid)
+        self._publish(json.loads(self.bodies[self._bootstrap_key]))
+
+    def _publish(self, bootstrap: dict[str, Any]) -> None:
+        self.bootstrap = bootstrap
+        self.bodies[self._bootstrap_key] = json.dumps(bootstrap)
+        # The adapter diffs against a standalone current-period `mRoster`; the
+        # bootstrap carries the same `teams[].roster` shape.
+        self.overrides["mRoster"] = bootstrap
+
+    def slots(self, team_id: int = 1) -> dict[str, int]:
+        """``{player_id: lineupSlotId}`` for one team, as the next read will see it."""
+        team = next(t for t in self.bootstrap["teams"] if t["id"] == team_id)
+        return {str(e["playerId"]): e["lineupSlotId"] for e in team["roster"]["entries"]}
+
+    def post(self, url: str, json: Any = None, **_: Any) -> FakeResponse:  # noqa: A002
+        body = json if json is not None else {}
+        self.posts.append(body)
+        if self.mode == "reject":
+            capture = _load_capture("p8-locked-player-move")
+            return FakeResponse(capture["response"]["body"], status_code=409)
+        if self.mode == "apply":
+            updated = _json_copy(self.bootstrap)
+            team = next(t for t in updated["teams"] if t["id"] == body.get("teamId"))
+            by_id = {e["playerId"]: e for e in team["roster"]["entries"]}
+            for item in body.get("items", []):
+                by_id[item["playerId"]]["lineupSlotId"] = item["toLineupSlotId"]
+            self._publish(updated)
+        items = [
+            {
+                "fromLineupSlotId": item["fromLineupSlotId"],
+                "fromTeamId": 0,
+                "isKeeper": False,
+                "overallPickNumber": 0,
+                "playerId": item["playerId"],
+                "toLineupSlotId": item["toLineupSlotId"],
+                "toTeamId": 0,
+                "type": "LINEUP",
+            }
+            for item in body.get("items", [])
+        ]
+        return FakeResponse(
+            {
+                "bidAmount": 0,
+                "executionType": "EXECUTE",
+                "id": TRANSACTION_ID,
+                "isActingAsTeamOwner": False,
+                "isLeagueManager": False,
+                "isPending": False,
+                "items": items,
+                "memberId": self.echo_member or self.overrides["mNav"]["members"][0]["id"],
+                "proposedDate": PROPOSED_DATE_MS,
+                "rating": 0,
+                "scoringPeriodId": body.get("scoringPeriodId"),
+                "skipTransactionCounters": False,
+                "status": "EXECUTED",
+                "subOrder": 0,
+                "teamId": body.get("teamId"),
+                "type": "ROSTER",
+            }
+        )
+
+
+def _load_capture(name: str) -> dict[str, Any]:
+    return json.loads((WRITE_CAPTURES / f"{name}.json").read_text(encoding="utf-8"))
+
+
+def _json_copy(value: Any) -> Any:
+    return json.loads(json.dumps(value))
+
+
+def install_writable_espn(monkeypatch: Any, **options: Any) -> WritableEspn:
+    """Route reads and writes at a :class:`WritableEspn`, with the clock fixed
+    before kickoff so nothing reads as locked."""
+    from datetime import datetime
+
+    import requests
+
+    http = WritableEspn(**options)
+    monkeypatch.setattr(requests, "get", http)
+    monkeypatch.setattr(requests, "post", http.post)
+    monkeypatch.setattr(
+        "fantasy_sports.providers.espn.utc_now", lambda: datetime.fromisoformat(UNLOCKED_AT)
+    )
+    return http

@@ -21,8 +21,10 @@ Three sources, and every sample says which one it came from:
   from ``tests/cassettes/espn/synthetic_2026.yaml`` through the same
   transport stub the unit tests use. It covers ``box-scores`` and
   ``free-agents``, which ESPN refuses before 2019 (the refusal itself is a
-  live sample), and the ``auth`` commands, whose Keychain is replaced by an
-  in-memory store and whose prompt is answered with placeholder cookies.
+  live sample), the ``auth`` commands, whose Keychain is replaced by an
+  in-memory store and whose prompt is answered with placeholder cookies, and
+  the write commands, whose write host is a stub answering the way brief 05
+  captured ESPN answering. No sample ever writes to a real league.
 * **synthetic** — an error envelope built directly from the exception class
   in ``core/errors.py`` and rendered by the output layer, for the four codes
   that need a live failure nobody can safely provoke: an expired cookie, an
@@ -730,6 +732,7 @@ def replayed_samples(recorder: Recorder) -> None:
 
     _auth_samples(recorder)
     _journal_samples(recorder)
+    _write_samples(recorder)
     sandbox.write_config(PUBLIC_CONFIG)
 
 
@@ -747,8 +750,9 @@ JOURNAL_CLAIM_ID = "c47d19ab-52e0-4f3c-8a16-9e0b3d7a2c55"
 def _journal_samples(recorder: Recorder) -> None:
     """``journal list``, ``show``, and ``digest`` against a seeded, invented journal.
 
-    Nothing writes to the journal yet (the write commands land after the store),
-    so these entries are seeded through the store's own API: one lineup swap
+    These entries are seeded through the store's own API rather than by
+    ``lineup set`` (whose samples are below), so the listing also shows a kind
+    no command writes yet: one lineup swap
     that ESPN accepted, in the request shape ``docs/research/05-espn-write-
     surface.md`` captured, and one claim that was begun and never closed, which
     is how a crash between the intent and the outcome looks. Ids and timestamps
@@ -819,7 +823,7 @@ def _journal_samples(recorder: Recorder) -> None:
             )
         )
     replayed = {"source": "replayed", "league": SYNTHETIC_LEAGUE}
-    note = "A seeded journal: the write commands that fill it land after the store"
+    note = "A seeded journal, so the sample is the same on every regeneration"
     recorder.run("journal-list", ["journal", "list"], **replayed, note=note)
     recorder.run(
         "journal-show", ["journal", "show", "--id", JOURNAL_SWAP_ID], **replayed, note=note
@@ -831,6 +835,94 @@ def _journal_samples(recorder: Recorder) -> None:
         note="A seeded journal; the claim was begun and never closed, so it is still pending",
     )
     path.unlink()
+
+
+WRITE_ENTRY_IDS = (
+    "6e1f0b3a-2c4d-4e8f-9a1b-3c5d7e9f1a2b",
+    "7a2b1c4d-3e5f-4a6b-8c7d-9e0f1a2b3c4d",
+    "8b3c2d5e-4f6a-4b7c-9d8e-0f1a2b3c4d5e",
+    "9c4d3e6f-5a7b-4c8d-ae9f-1a2b3c4d5e6f",
+)
+"""Journal entry ids the write samples mint, in order, so they are byte-stable."""
+
+
+def _write_samples(recorder: Recorder) -> None:
+    """``lineup set``, ``journal reverse``, and the two write codes, offline.
+
+    The synthetic league ``99`` behind :class:`_harness.WritableEspn`: reads
+    replay the committed cassette, and the write host answers the way
+    ``docs/research/05-espn-write-surface/`` captured ESPN answering -- a 200
+    ``EXECUTED`` that the next read reflects, the same 200 with a read-back
+    that disagrees, or ``p8-locked-player-move``'s 409. The clock is fixed
+    before the week's kickoffs and journal ids are fixed, so every run renders
+    the same bytes. The session owns team 1 through a stubbed ``mNav``.
+    """
+    from datetime import datetime
+
+    import requests
+    from _harness import FAKE_SWID, UNLOCKED_AT, WritableEspn
+
+    import fantasy_sports.core.journal as journal_module
+    import fantasy_sports.providers.espn as espn_module
+
+    sandbox = recorder.sandbox
+    path = sandbox.state / "fantasy-sports" / "journal.sqlite"
+    path.unlink(missing_ok=True)
+    ids = iter(WRITE_ENTRY_IDS)
+    saved = (requests.get, requests.post, espn_module.utc_now, journal_module.new_entry_id)
+    espn_module.utc_now = lambda: datetime.fromisoformat(UNLOCKED_AT)  # type: ignore[assignment]
+    journal_module.new_entry_id = lambda: next(ids)  # type: ignore[assignment]
+    # An ordinary-shaped invented GUID, not PLACEHOLDER_SWID: the placeholder
+    # sits in the pseudonym sentinel range, so the scrubber leaves it alone and
+    # the secret redaction then blanks it out of `mNav`, and the session would
+    # own nothing. This one is pseudonymised like a real SWID.
+    env = {**sandbox.env(), "FANTASY_SPORTS_SWID": FAKE_SWID}
+    replayed = {"source": "replayed", "league": SYNTHETIC_LEAGUE, "env": env}
+    swap = ["lineup", "set", "--team", "1", "--set", "2002=BE", "--set", "Katherine Johnson=WR"]
+
+    def serve(mode: str) -> None:
+        http = WritableEspn(swid=FAKE_SWID, mode=mode)
+        requests.get, requests.post = http, http.post  # type: ignore[assignment]
+
+    try:
+        serve("apply")
+        recorder.run("lineup-set.dry-run", [*swap, "--dry-run"], **replayed)
+        recorder.run(
+            "lineup-set",
+            swap,
+            **replayed,
+            note="The clock is fixed before the week's kickoffs, so nothing is locked and the "
+            "ages are large",
+        )
+        recorder.run(
+            "journal-reverse",
+            ["journal", "reverse", "--id", WRITE_ENTRY_IDS[0]],
+            **replayed,
+            note="Reverses the lineup-set sample above, against the same replayed league",
+        )
+        serve("reject")
+        recorder.run(
+            "error-write-rejected",
+            swap,
+            **replayed,
+            expect=11,
+            note="The write host answers with the 409 captured in brief 05 (p8)",
+            raw_keys=12,
+            raw_depth=3,
+        )
+        serve("ignore")
+        recorder.run(
+            "error-write-diverged",
+            swap,
+            **replayed,
+            expect=12,
+            note="The write host answers 200 EXECUTED and the read-back still shows the old lineup",
+            raw_keys=12,
+            raw_depth=3,
+        )
+    finally:
+        requests.get, requests.post, espn_module.utc_now, journal_module.new_entry_id = saved
+        path.unlink(missing_ok=True)
 
 
 def _auth_samples(recorder: Recorder) -> None:

@@ -684,8 +684,9 @@ Commands:
   box-scores    List both lineups for a week's matchups, player by player, with projections.
   doctor        Run every health check: config, credentials, cache, journal, version, provider.
   free-agents   List unrostered players, optionally filtered to one position.
-  journal       3 subcommands: digest, list, show
+  journal       4 subcommands: digest, list, reverse, show
   league        1 subcommand: info
+  lineup        1 subcommand: set
   matchups      List head-to-head pairings for a week, with both ESPN period identifiers.
   raw           Pass a view straight through to ESPN and return its payload unmodified.
   roster        List one team's roster slots: player, lineup slot, eligibility, kickoff, lock.
@@ -2278,6 +2279,237 @@ fantasy-sports auth logout
 ```
 <!-- /sample -->
 
+### `lineup set`
+
+Moves players on **your own team** to the slots you name, in one ESPN
+transaction. The first command that writes to a league. `--set PLAYER=SLOT`
+is repeatable and is an explicit **target**, never a relative move: it says
+where each player should end up. `PLAYER` is a player id from `roster`, or a
+case-insensitive name that matches exactly one player on that roster; `SLOT`
+is a slot name as `roster` prints it (`QB`, `RB`, `WR`, `TE`, `RB/WR/TE`,
+`D/ST`, `K`, `BE`, `IR`).
+
+What happens, in order:
+
+1. A **fresh** read of the team's roster and the league's slot counts,
+   whatever `--fresh` says.
+2. The diff: one move per named player whose slot differs, vacates (to `BE`
+   or `IR`) listed first. A target that already matches is refused, because
+   ESPN has no no-op transaction.
+3. **Preflight**, each a `CONFIG_INVALID` with `details.kind` of `argument`
+   that names the player, before anything is journaled or sent: a slot not in
+   the player's `eligible_slots`; a player whose game has started (`is_locked`)
+   and would have to move; a final lineup that holds more players in a slot
+   than the league allows (ESPN checks the final lineup, not each move); a
+   player named twice; a name matching no player or more than one.
+4. **Ownership**: a `--team` the configured session does not own is
+   `WRITE_REJECTED` with `details.kind` of `not_owned`, whatever the
+   session's league-manager role. There is no override.
+5. A journal entry with the prior slots, status `pending`, **before** the
+   request. A journal that cannot be written stops the write.
+6. One POST for the league's current scoring period. There is no `--week`:
+   ESPN accepts a lineup write only for the current period. A rejection is
+   `WRITE_REJECTED`, and any failure known not to have sent closes the entry
+   `rejected`. A timeout is `PROVIDER_UNAVAILABLE` with
+   `details.transaction_state` of `unknown`, and the entry stays `pending`,
+   because nobody knows whether it applied.
+7. **Read-back**: the roster is re-read live and compared slot for slot for
+   every named player. A mismatch is `WRITE_DIVERGED`, with the differing
+   players in `details.diverged` and the transaction and journal ids
+   alongside; the entry closes `diverged`. A read-back that cannot be made
+   at all is still a success, with `read_back.verified` false and a
+   `warnings` line, because ESPN did execute the change.
+
+`data` is one object: `team_id`, `kind` (`lineup`), `provider_transaction_id`
+and `proposed_at` (ESPN's own, to join against `transactions`), `status` and
+`is_pending`, `items` (`player_id`, `from_slot`, `to_slot` per moved
+player), `journal_entry_id`, `reversible` (`true`), `acknowledged_irreversible`
+(`null`; only the irreversible writes carry one), `cost`, `credentials`
+(`espn_s2_age_seconds` and a `warning`, so an old cookie shows up on a
+success rather than on the failure after it), `read_back` (`verified`,
+`diverged`), and `dry_run`. `warnings` appears only when there is one.
+
+| Option | |
+|---|---|
+| `--team` | Your team's id or name. Required |
+| `--set` | `PLAYER=SLOT`, repeatable. Required |
+| `--dry-run` | Report the `items` that would be sent; send and journal nothing |
+
+<!-- sample: lineup-set -->
+```bash
+fantasy-sports lineup set --team 1 --set 2002=BE --set 'Katherine Johnson=WR'
+# synthetic league 99, season 2026 (replayed). Exit 0, stdout. The clock is fixed before the week's kickoffs, so nothing is locked and the ages are large:
+```
+```json
+{
+  "schema": "fantasy-sports/v1",
+  "provider": "espn",
+  "league_id": "99",
+  "season": 2026,
+  "generated_at": "2026-10-15T06:36:50Z",
+  "data_as_of": "2026-09-10T12:00:00Z",
+  "data_age_seconds": 3004610,
+  "sources": [
+    {
+      "name": "mTeam+mRoster+mMatchup+mSettings+mStandings",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3004610,
+      "cached": false
+    },
+    {
+      "name": "players_wl",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3004610,
+      "cached": false
+    },
+    {
+      "name": "proTeamSchedules_wl",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3004610,
+      "cached": false
+    },
+    {
+      "name": "mDraftDetail",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3004610,
+      "cached": false
+    }
+  ],
+  "untrusted": {},
+  "raw_omitted": false,
+  "data": {
+    "team_id": "1",
+    "kind": "lineup",
+    "provider_transaction_id": "5d0c6e2a-7f41-4b9e-a3c8-1e6f2b9d4a70",
+    "status": "EXECUTED",
+    "is_pending": false,
+    "proposed_at": "2026-09-10T12:00:01Z",
+    "items": [
+      {
+        "player_id": "2002",
+        "from_slot": "RB",
+        "to_slot": "BE"
+      },
+      {
+        "player_id": "2003",
+        "from_slot": "BE",
+        "to_slot": "WR"
+      }
+    ],
+    "journal_entry_id": "6e1f0b3a-2c4d-4e8f-9a1b-3c5d7e9f1a2b",
+    "reversible": true,
+    "acknowledged_irreversible": null,
+    "cost": {
+      "bid_amount": null,
+      "displaced_player_id": null
+    },
+    "credentials": {
+      "espn_s2_age_seconds": null,
+      "warning": "credential age unknown"
+    },
+    "read_back": {
+      "verified": true,
+      "diverged": []
+    },
+    "dry_run": false
+  },
+  "error": null
+}
+```
+<!-- /sample -->
+
+`--dry-run` runs every preflight and the ownership check, then stops. The
+ids are `null`, `read_back` is `null`, `credentials` is filled, and `note`
+says plainly that ESPN was not asked: it has no validate-only mode, so a dry
+run cannot promise ESPN would accept the change.
+
+<!-- sample: lineup-set.dry-run -->
+```bash
+fantasy-sports lineup set --team 1 --set 2002=BE --set 'Katherine Johnson=WR' --dry-run
+# synthetic league 99, season 2026 (replayed). Exit 0, stdout:
+```
+```json
+{
+  "schema": "fantasy-sports/v1",
+  "provider": "espn",
+  "league_id": "99",
+  "season": 2026,
+  "generated_at": "2026-10-15T06:36:50Z",
+  "data_as_of": "2026-09-10T12:00:00Z",
+  "data_age_seconds": 3004610,
+  "sources": [
+    {
+      "name": "mTeam+mRoster+mMatchup+mSettings+mStandings",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3004610,
+      "cached": false
+    },
+    {
+      "name": "players_wl",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3004610,
+      "cached": false
+    },
+    {
+      "name": "proTeamSchedules_wl",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3004610,
+      "cached": false
+    },
+    {
+      "name": "mDraftDetail",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3004610,
+      "cached": false
+    },
+    {
+      "name": "mNav",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3004610,
+      "cached": false
+    }
+  ],
+  "untrusted": {},
+  "raw_omitted": false,
+  "data": {
+    "team_id": "1",
+    "kind": "lineup",
+    "provider_transaction_id": null,
+    "status": null,
+    "is_pending": null,
+    "proposed_at": null,
+    "items": [
+      {
+        "player_id": "2002",
+        "from_slot": "RB",
+        "to_slot": "BE"
+      },
+      {
+        "player_id": "2003",
+        "from_slot": "BE",
+        "to_slot": "WR"
+      }
+    ],
+    "journal_entry_id": null,
+    "reversible": true,
+    "acknowledged_irreversible": null,
+    "cost": {
+      "bid_amount": null,
+      "displaced_player_id": null
+    },
+    "credentials": {
+      "espn_s2_age_seconds": null,
+      "warning": "credential age unknown"
+    },
+    "read_back": null,
+    "dry_run": true,
+    "note": "Dry run: nothing was sent and nothing was journaled. The items were computed from the roster just read; ESPN has no validate-only mode, so whether it would accept them was not checked."
+  },
+  "error": null
+}
+```
+<!-- /sample -->
+
 ### `journal list`
 
 The mutation journal, newest first: every write this tool attempted, who ESPN
@@ -2293,8 +2525,8 @@ The command reads a local file: no league is resolved, no credential is
 needed, and the envelope's `provider`, `league_id`, and `season` are `null`.
 A machine that has never written is an empty list, not an error; a journal
 that exists but cannot be read is an error, because "no entries" would be a
-lie about an audit trail. Nothing writes to the journal yet, so the sample
-below is seeded; its entries have the shape the write commands will record.
+lie about an audit trail. `lineup set` and `journal reverse` write to it; the
+sample below is seeded so it reads the same on every regeneration.
 
 | Option | |
 |---|---|
@@ -2305,7 +2537,7 @@ below is seeded; its entries have the shape the write commands will record.
 <!-- sample: journal-list -->
 ```bash
 fantasy-sports journal list
-# synthetic league 99, season 2026 (replayed). Exit 0, stdout. A seeded journal: the write commands that fill it land after the store:
+# synthetic league 99, season 2026 (replayed). Exit 0, stdout. A seeded journal, so the sample is the same on every regeneration:
 ```
 ```json
 {
@@ -2544,7 +2776,7 @@ the nearest ids in `details.nearest`.
 <!-- sample: journal-show -->
 ```bash
 fantasy-sports journal show --id 0f8a9c2e-6b1d-4e57-9a3c-2d7b5e1f4a60
-# synthetic league 99, season 2026 (replayed). Exit 0, stdout. A seeded journal: the write commands that fill it land after the store:
+# synthetic league 99, season 2026 (replayed). Exit 0, stdout. A seeded journal, so the sample is the same on every regeneration:
 ```
 ```json
 {
@@ -2620,6 +2852,114 @@ fantasy-sports journal show --id 0f8a9c2e-6b1d-4e57-9a3c-2d7b5e1f4a60
 ```
 <!-- /sample -->
 
+### `journal reverse`
+
+Undoes one lineup change by sending its inverse: every player the entry
+named goes back to the slot its `prior_state` recorded. It is the same flow
+as `lineup set`, preflight, ownership, journal, one POST, and read-back,
+against the league the entry names (a profile for that league must still be
+in `config.toml`), journaled as a new entry of kind `reverse` whose
+`reverses` is the original's id. A reverse can itself be reversed.
+
+Only an `executed` or `diverged` lineup (or reverse) entry qualifies. A
+`pending` or `rejected` entry is `CONFIG_INVALID`: nothing is known to have
+applied. An `add`, `drop`, `claim`, or `cancel` is `NOT_AVAILABLE` and
+**nothing is sent**; `remediation` says what a human would have to do
+instead. A player who is now locked is refused in preflight, or by ESPN as
+`WRITE_REJECTED` with `details.kind` of `roster_lock`; one transaction never
+half-applies. A lineup that is already back where it was is an empty diff.
+
+`data` is the `lineup set` object with `kind` of `reverse` and `reverses`.
+
+| Option | |
+|---|---|
+| `--id` | The entry to undo, as `journal list` prints it. Required |
+| `--dry-run` | Report the moves the reversal would send; send and journal nothing |
+
+<!-- sample: journal-reverse -->
+```bash
+fantasy-sports journal reverse --id 6e1f0b3a-2c4d-4e8f-9a1b-3c5d7e9f1a2b
+# synthetic league 99, season 2026 (replayed). Exit 0, stdout. Reverses the lineup-set sample above, against the same replayed league:
+```
+```json
+{
+  "schema": "fantasy-sports/v1",
+  "provider": "espn",
+  "league_id": "99",
+  "season": 2026,
+  "generated_at": "2026-10-15T06:36:50Z",
+  "data_as_of": "2026-09-10T12:00:00Z",
+  "data_age_seconds": 3004610,
+  "sources": [
+    {
+      "name": "mTeam+mRoster+mMatchup+mSettings+mStandings",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3004610,
+      "cached": false
+    },
+    {
+      "name": "players_wl",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3004610,
+      "cached": false
+    },
+    {
+      "name": "proTeamSchedules_wl",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3004610,
+      "cached": false
+    },
+    {
+      "name": "mDraftDetail",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3004610,
+      "cached": false
+    }
+  ],
+  "untrusted": {},
+  "raw_omitted": false,
+  "data": {
+    "team_id": "1",
+    "kind": "reverse",
+    "provider_transaction_id": "5d0c6e2a-7f41-4b9e-a3c8-1e6f2b9d4a70",
+    "status": "EXECUTED",
+    "is_pending": false,
+    "proposed_at": "2026-09-10T12:00:01Z",
+    "items": [
+      {
+        "player_id": "2003",
+        "from_slot": "WR",
+        "to_slot": "BE"
+      },
+      {
+        "player_id": "2002",
+        "from_slot": "BE",
+        "to_slot": "RB"
+      }
+    ],
+    "journal_entry_id": "7a2b1c4d-3e5f-4a6b-8c7d-9e0f1a2b3c4d",
+    "reversible": true,
+    "acknowledged_irreversible": null,
+    "cost": {
+      "bid_amount": null,
+      "displaced_player_id": null
+    },
+    "credentials": {
+      "espn_s2_age_seconds": null,
+      "warning": "credential age unknown"
+    },
+    "read_back": {
+      "verified": true,
+      "diverged": []
+    },
+    "dry_run": false,
+    "reverses": "6e1f0b3a-2c4d-4e8f-9a1b-3c5d7e9f1a2b"
+  },
+  "error": null
+}
+```
+<!-- /sample -->
+
 ## Errors
 
 Every failure is one JSON document on stderr, with the same key set as a
@@ -2641,6 +2981,8 @@ piped stderr is always exactly the one document.
 | `RATE_LIMITED` | 8 | ESPN throttled the request | yes | Retry after `details.retry_after` |
 | `SCHEMA_DRIFT` | 9 | A response no longer has the shape the adapter reads | no | Stop; file an issue |
 | `NOT_AVAILABLE` | 10 | ESPN positively refuses this request; it will never succeed as asked | no | Do not retry; read `remediation` |
+| `WRITE_REJECTED` | 11 | A write was refused, by ESPN or by the tool before sending; nothing applied | no | Do not retry unchanged; read the roster and re-plan |
+| `WRITE_DIVERGED` | 12 | ESPN accepted a write, but the read-back disagrees | no | Do not retry; read the roster and reconcile |
 
 `0` is success, `1` an unclassified crash, `2` a usage error. Inside
 `error`, every key is always present: `code`, `message`, `retryable`,
@@ -3194,6 +3536,110 @@ fantasy-sports free-agents --pos RB --limit 5
     "details": {
       "season": "2018",
       "week": "17"
+    },
+    "health": null
+  }
+}
+```
+<!-- /sample -->
+
+### `WRITE_REJECTED` — exit 11
+
+A write that did not apply. One code for every reason, with the reason in
+`details.kind`: `roster_lock`, `not_owned`, `auth`, and the rest of ADR-0010's
+closed vocabulary. `details.provider_type` is ESPN's own `TRAN_*` string,
+`remediation` is ESPN's message, and `details.transaction_applied` is always
+`false`: one ESPN transaction is validated and applied atomically, so a
+rejection changed nothing. A `not_owned` refusal is the tool's, before any
+request.
+
+<!-- sample: error-write-rejected -->
+```bash
+fantasy-sports lineup set --team 1 --set 2002=BE --set 'Katherine Johnson=WR'
+# synthetic league 99, season 2026 (replayed). Exit 11, stderr. The write host answers with the 409 captured in brief 05 (p8):
+```
+```json
+{
+  "schema": "fantasy-sports/v1",
+  "provider": null,
+  "league_id": null,
+  "season": null,
+  "generated_at": "2026-10-15T06:36:50Z",
+  "data_as_of": null,
+  "data_age_seconds": null,
+  "sources": [],
+  "untrusted": {},
+  "raw_omitted": false,
+  "data": null,
+  "error": {
+    "code": "WRITE_REJECTED",
+    "message": "ESPN rejected the transaction (TRAN_LINEUP_LOCKED).",
+    "retryable": false,
+    "agent_action": "Do not retry unchanged; read the roster and re-plan.",
+    "remediation": "Lineup transaction could not be completed, Player 9000007 is locked",
+    "details": {
+      "kind": "roster_lock",
+      "provider_type": "TRAN_LINEUP_LOCKED",
+      "http_status": 409,
+      "team_id": "1",
+      "transaction_applied": false
+    },
+    "health": null
+  }
+}
+```
+<!-- /sample -->
+
+### `WRITE_DIVERGED` — exit 12
+
+The opposite failure: ESPN said yes and the roster does not match what was
+asked, because something moved it between the read and the write. The
+change may well have applied, so retrying could double-apply it.
+`details.diverged` lists the player ids that differ, `expected` and
+`observed` their slots, and `provider_transaction_id` and
+`journal_entry_id` the records of what was sent.
+
+<!-- sample: error-write-diverged -->
+```bash
+fantasy-sports lineup set --team 1 --set 2002=BE --set 'Katherine Johnson=WR'
+# synthetic league 99, season 2026 (replayed). Exit 12, stderr. The write host answers 200 EXECUTED and the read-back still shows the old lineup:
+```
+```json
+{
+  "schema": "fantasy-sports/v1",
+  "provider": null,
+  "league_id": null,
+  "season": null,
+  "generated_at": "2026-10-15T06:36:50Z",
+  "data_as_of": null,
+  "data_age_seconds": null,
+  "sources": [],
+  "untrusted": {},
+  "raw_omitted": false,
+  "data": null,
+  "error": {
+    "code": "WRITE_DIVERGED",
+    "message": "ESPN accepted the lineup change, but the roster read back differently for 2 player(s).",
+    "retryable": false,
+    "agent_action": "Do not retry; the write may have applied. Read the roster and reconcile.",
+    "remediation": "Something changed the roster between the read and the write, or ESPN applied it differently. Read the roster and decide before writing again; do not resend the same change blind.",
+    "details": {
+      "diverged": [
+        "2002",
+        "2003"
+      ],
+      "team_id": "1",
+      "provider_transaction_id": "5d0c6e2a-7f41-4b9e-a3c8-1e6f2b9d4a70",
+      "journal_entry_id": "9c4d3e6f-5a7b-4c8d-ae9f-1a2b3c4d5e6f",
+      "transaction_state": "applied",
+      "expected": {
+        "2002": "BE",
+        "2003": "WR"
+      },
+      "observed": {
+        "2002": "RB",
+        "2003": "BE"
+      }
     },
     "health": null
   }

@@ -557,3 +557,68 @@ register(
         ),
     )
 )
+
+register(
+    CommandSpec(
+        name="reverse",
+        group="journal",
+        summary="Undo a lineup entry: move every player back to the slot it recorded. Writes.",
+        handler="fantasy_sports.commands.journal:journal_reverse",
+        shape=DataShape.OBJECT,
+        takes_league=False,
+        params=(
+            Param(
+                name="id",
+                help="Entry id of an executed lineup change, as printed by `journal list`. "
+                "An add, drop, or claim cannot be reversed and fails with NOT_AVAILABLE.",
+                annotation=str,
+                required=True,
+            ),
+            Param(
+                name="dry_run",
+                help="Report the moves the reversal would send. Sends and journals nothing; "
+                "does not validate that ESPN would accept them.",
+                annotation=bool,
+                default=False,
+            ),
+        ),
+    )
+)
+
+# --------------------------------------------------------------------------- #
+# Writes (jwulff/fantasy-sports#15)
+# --------------------------------------------------------------------------- #
+
+register(
+    CommandSpec(
+        name="set",
+        group="lineup",
+        summary="Move your own team's players to explicit slots in one transaction. Writes.",
+        handler="fantasy_sports.commands.lineup:set_lineup",
+        shape=DataShape.OBJECT,
+        params=(
+            Param(
+                name="team",
+                help="Your own team: id, or its name (case-insensitive; a unique prefix is "
+                "enough). Any team the session does not own is refused.",
+                annotation=str,
+                required=True,
+            ),
+            Param(
+                name="set",
+                help="PLAYER=SLOT, repeatable: where each player should end up. PLAYER is a "
+                "player id or a name unique on the roster; SLOT as `roster` prints it "
+                "(QB, RB, WR, TE, RB/WR/TE, D/ST, K, BE, IR).",
+                annotation=list[str],
+                required=True,
+            ),
+            Param(
+                name="dry_run",
+                help="Report the moves that would be sent. Sends and journals nothing; does "
+                "not validate that ESPN would accept them.",
+                annotation=bool,
+                default=False,
+            ),
+        ),
+    )
+)

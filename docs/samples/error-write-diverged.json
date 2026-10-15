@@ -1,0 +1,39 @@
+{
+  "schema": "fantasy-sports/v1",
+  "provider": null,
+  "league_id": null,
+  "season": null,
+  "generated_at": "2026-10-15T06:36:50Z",
+  "data_as_of": null,
+  "data_age_seconds": null,
+  "sources": [],
+  "untrusted": {},
+  "raw_omitted": false,
+  "data": null,
+  "error": {
+    "code": "WRITE_DIVERGED",
+    "message": "ESPN accepted the lineup change, but the roster read back differently for 2 player(s).",
+    "retryable": false,
+    "agent_action": "Do not retry; the write may have applied. Read the roster and reconcile.",
+    "remediation": "Something changed the roster between the read and the write, or ESPN applied it differently. Read the roster and decide before writing again; do not resend the same change blind.",
+    "details": {
+      "diverged": [
+        "2002",
+        "2003"
+      ],
+      "team_id": "1",
+      "provider_transaction_id": "5d0c6e2a-7f41-4b9e-a3c8-1e6f2b9d4a70",
+      "journal_entry_id": "9c4d3e6f-5a7b-4c8d-ae9f-1a2b3c4d5e6f",
+      "transaction_state": "applied",
+      "expected": {
+        "2002": "BE",
+        "2003": "WR"
+      },
+      "observed": {
+        "2002": "RB",
+        "2003": "BE"
+      }
+    },
+    "health": null
+  }
+}

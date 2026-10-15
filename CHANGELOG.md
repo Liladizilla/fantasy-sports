@@ -10,6 +10,18 @@ football API, distributed via `uv tool install fantasy-sports`.
 
 ### Added
 
+- **`lineup set` and `journal reverse`, the first writes** — `lineup set
+  --team T --set PLAYER=SLOT ...` moves the session's own team to an explicit
+  target lineup in one ESPN transaction. It reads fresh, preflights
+  eligibility, locks, final slot counts, and duplicate or ambiguous players
+  as named `CONFIG_INVALID` errors, refuses any team the session does not own
+  before journaling, journals the prior slots before the POST, and reads the
+  roster back slot for slot (`WRITE_DIVERGED` on a mismatch). `--dry-run`
+  reports the moves and sends nothing. `journal reverse --id` sends a lineup
+  entry's inverse through the same flow, journaled as kind `reverse`, and
+  refuses add/drop/claim/cancel entries as `NOT_AVAILABLE` without sending.
+  `WRITE_REJECTED` and `WRITE_DIVERGED` now have real command samples (#15,
+  #16).
 - **Irreversible writes are surfaced without a manual check** (#113, R7a).
   `journal digest --since <24h|7d|30m|ISO-8601> [--irreversible] [--league]
   [--limit]` lists journal entries recorded in a window, newest first, in the

@@ -1024,7 +1024,7 @@ class EspnProvider:
         cache_mode: CacheMode | None = None,
         http: Callable[..., Any] | None = None,
         http_post: Callable[..., Any] | None = None,
-        now: Callable[[], datetime] = utc_now,
+        now: Callable[[], datetime] | None = None,
         free_agent_limit: int = 50,
         auth_state_path: Path | None = None,
     ) -> None:
@@ -1047,7 +1047,10 @@ class EspnProvider:
         # (docs/memory/default-args-defeat-monkeypatch.md).
         self._http_post = http_post
         self._auth_state_path = auth_state_path
-        self._now = now
+        # Same rule for the clock: `utc_now` is looked up when no clock is
+        # given, so a test or the doc-sample generator that patches the
+        # module's `utc_now` reaches a provider `open_read` built.
+        self._now = now if now is not None else (lambda: utc_now())
         self._free_agent_limit = free_agent_limit
         self._echoed_members: dict[tuple[str, int], str] = {}
         self._identity_mismatches: dict[tuple[str, int], tuple[str, str]] = {}

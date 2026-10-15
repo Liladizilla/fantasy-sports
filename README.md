@@ -25,9 +25,10 @@ The read path is complete for ESPN: nine commands — `league info`, `teams`,
 `transactions`, and the `raw` escape hatch — all return the versioned
 envelope described below, backed by an offline test suite and a daily
 drift canary. Every command's output, in every mode, is in the
-[command reference](docs/commands.md). Writes (lineup changes, waiver claims, trades) have not
-started; they're tracked in the [v0.1 epic](https://github.com/jwulff/fantasy-sports/issues/1)
-and gated by [ADR-0006](docs/adr/0006-read-only-v01-gated-writes-later.md).
+[command reference](docs/commands.md). Writes have started with the
+reversible kind: `lineup set` changes your own team's lineup, and `journal
+reverse` undoes it (see [Writing](#writing)). Adds, drops, waiver claims, and
+trades are tracked in the [write-surface epic](https://github.com/jwulff/fantasy-sports/issues/105).
 The package is not on PyPI (`0.1.0.dev0`); install from git as below.
 
 ## Install
@@ -184,9 +185,11 @@ fails if a committed sample no longer matches what the code renders.
 | [`transactions`](docs/commands.md#transactions) | Recent roster moves, newest first |
 | [`raw`](docs/commands.md#raw) | One ESPN view passed straight through, payload unmodified |
 | [`doctor`](docs/commands.md#doctor) | Every health check: config, credentials, cache, journal, version, provider status |
+| [`lineup set`](docs/commands.md#lineup-set) | Move your own team's players to explicit slots, journaled and read back. **Writes** |
 | [`journal list`](docs/commands.md#journal-list) | The mutation journal, newest first: each write, who made it, how it ended |
 | [`journal digest`](docs/commands.md#journal-digest) | Journal entries since a time, newest first, for a cron job or agent to report |
 | [`journal show`](docs/commands.md#journal-show) | One journal entry in full: prior and applied state, acting member, cost |
+| [`journal reverse`](docs/commands.md#journal-reverse) | Undo a lineup entry by moving every player back to its recorded slot. **Writes** |
 | [`auth status`](docs/commands.md#auth-status) | Which credentials are configured, from where, and how old |
 | [`auth login`](docs/commands.md#auth-login) | Store the two ESPN cookies in the Keychain, without echoing them |
 | [`auth logout`](docs/commands.md#auth-logout) | Remove them from the Keychain and `config.toml`; report what it cannot unset |
@@ -365,6 +368,8 @@ fantasy-sports box-scores --week 1
 | `RATE_LIMITED` | Throttled | 8 |
 | `SCHEMA_DRIFT` | Response shape unrecognized | 9 |
 | `NOT_AVAILABLE` | ESPN positively refuses this request; it will never succeed as asked | 10 |
+| `WRITE_REJECTED` | A write was refused, by ESPN or by the tool before sending; nothing applied | 11 |
+| `WRITE_DIVERGED` | ESPN accepted a write, but the roster read back differently | 12 |
 
 `0` is success, `1` is an unclassified crash, `2` is a usage error. Every
 code is shown with a real or provoked example in the
@@ -379,12 +384,12 @@ next from what came back. The rules it holds, in the order an agent hits
 them:
 
 1. **Parse stdout as JSON on exit `0`; parse stderr as JSON on exits `3`
-   through `10`, and treat anything else as prose.** A success is one JSON
+   through `12`, and treat anything else as prose.** A success is one JSON
    document on stdout and nothing on stderr. A taxonomy failure is one JSON
    document on stderr, an empty stdout, and the exit status from the table
    above; when stderr is a terminal, and only then, a `PROVIDER_UNAVAILABLE`
    or `SCHEMA_DRIFT` failure may be followed by a prose paragraph of upgrade
-   or outage guidance for the human watching. Outside `0` and `3`–`10` there
+   or outage guidance for the human watching. Outside `0` and `3`–`12` there
    is no envelope: `1` is a crash with a traceback, `2` is the argument
    parser's own usage error, `130` is an interrupt. `auth login` is the one
    command not built for a program: it is interactive and writes its prompts
@@ -432,7 +437,7 @@ def fantasy(*args: str, attempts: int = 4) -> dict:
         )
         if run.returncode == 0:
             return json.loads(run.stdout)
-        if not 3 <= run.returncode <= 10:  # crash, usage error, interrupt: prose, no envelope
+        if not 3 <= run.returncode <= 12:  # crash, usage error, interrupt: prose, no envelope
             raise SystemExit(run.stderr or f"exit {run.returncode}")
         error = json.loads(run.stderr)["error"]
         if not error["retryable"] or attempt == attempts - 1:
@@ -457,6 +462,53 @@ for game in matchups["data"]:
 ```
 
 Every field this loop reads is shown in the [command reference](docs/commands.md).
+
+## Writing
+
+`lineup set` is the first command that changes a league, and it is built to
+be run by an agent with nobody watching. There is no confirmation prompt and
+no dry-run default. What makes that safe is the shape of the loop:
+
+```bash
+# 1. Read. 2. Preview, optionally. 3. Write. 4. Undo, if needed.
+fantasy-sports roster --team "My Team" --league my-league --fresh
+fantasy-sports lineup set --team "My Team" --set "Player A=BE" --set "Player B=WR" --dry-run
+fantasy-sports lineup set --team "My Team" --set "Player A=BE" --set "Player B=WR"
+fantasy-sports journal reverse --id JOURNAL_ENTRY_ID
+```
+
+- **Say where players end up, not how to get there.** Each `--set
+  PLAYER=SLOT` is a target. The command reads the roster, works out the
+  moves, and sends them as one transaction that ESPN applies all or nothing.
+  A target that already matches is refused.
+- **`--team` must be your own team.** The tool refuses any team the
+  configured ESPN session does not own, with `WRITE_REJECTED` kind
+  `not_owned`, before anything is sent or journaled. A commissioner's cookie
+  can move other managers' players on ESPN; this tool will not, and there is
+  no flag to make it.
+- **Everything the read can check is checked first.** An ineligible slot, a
+  player whose game has started, a slot the final lineup overfills, or a
+  name that matches two players is `CONFIG_INVALID` naming the player, and
+  nothing is sent.
+- **`--dry-run` shows the exact moves and sends nothing.** It cannot tell
+  you whether ESPN would accept them: ESPN has no validate-only mode, and
+  the output says so.
+- **Every write is journaled before it is sent and read back after.** The
+  journal entry holds the prior slots. After ESPN accepts, the roster is
+  re-read live and compared slot for slot; a mismatch is `WRITE_DIVERGED`,
+  which means do not retry, read the roster and reconcile. `read_back.verified`
+  is `true` on a clean success.
+- **A lineup change can be reversed until kickoff.** `journal reverse --id`
+  sends every player back to the slot the entry recorded, through the same
+  checks, and journals the reversal. An add, drop, or claim cannot be
+  reversed, and asking is `NOT_AVAILABLE` with nothing sent.
+- **Watch `credentials.warning` on every write.** Each result reports how old
+  the `espn_s2` cookie is, so an agent learns it is ageing from a success,
+  not from a failed write before a deadline.
+
+`journal list` shows every write this machine made, who ESPN says made it,
+and how it ended. `doctor` reports any entry still `pending`: a write that
+may have gone out without its outcome being recorded.
 
 ### Being told about irreversible writes
 

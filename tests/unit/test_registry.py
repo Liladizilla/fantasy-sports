@@ -32,7 +32,8 @@ def clean_registry():
 
 #: The v0.1 command surface, exactly as ARCHITECTURE §12 lists it, plus
 #: `doctor` (jwulff/fantasy-sports#10, ADR-0005 §11.4) and `auth logout`
-#: (jwulff/fantasy-sports#62). No league write command exists yet.
+#: (jwulff/fantasy-sports#62), and the first two writes: `lineup set` (#15) and
+#: `journal reverse` (#16).
 V01_SURFACE = frozenset(
     {
         "auth login",
@@ -43,8 +44,10 @@ V01_SURFACE = frozenset(
         "free-agents",
         "journal digest",
         "journal list",
+        "journal reverse",
         "journal show",
         "league info",
+        "lineup set",
         "matchups",
         "raw",
         "roster",
@@ -65,7 +68,9 @@ def test_the_v01_surface_is_registered_and_nothing_else_is():
     third: `SECURITY.md` could not describe a leak remediation without it
     (jwulff/fantasy-sports#62). `journal list` and `journal show` are the
     fourth and fifth, the read side of the mutation journal
-    (jwulff/fantasy-sports#16).
+    (jwulff/fantasy-sports#16). `lineup set` and `journal reverse` are the
+    first writes, from the write-surface plan (jwulff/fantasy-sports#105):
+    the reversible half, ahead of `add`/`drop`/`claim` (#18).
     """
     assert set(REGISTRY) == V01_SURFACE
 

@@ -34,5 +34,12 @@ vocabulary and omit `BE`, `IR`, and `RB/WR/TE`. Map a slot name to a
 `lineupSlotId` through the integer keys, or the three slots a lineup change
 most often targets are refused as unknown.
 
+A third, found building `lineup set` (#15): a SWID in the pseudonym
+**sentinel range** (`{00000000-…}`, like the doc generator's
+`PLACEHOLDER_SWID`) is never pseudonymised, because the scrubber takes it for
+one already. The registered-secret redaction then blanks it to
+`***redacted***` in `mNav`, and the session owns nothing. A fixture that has
+to own a team needs an ordinary-shaped invented GUID.
+
 Related: [[swid-pseudonyms]], [[cache-redaction-and-tag-classes]],
 [[commissioner-authority-is-two-flags-in-mnav]]

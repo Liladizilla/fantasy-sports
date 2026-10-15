@@ -433,6 +433,39 @@ comes back:
   {espn_s2_age_seconds, warning}`), computed before the request from the same
   staleness report `auth status` renders.
 
+**`lineup set` and `journal reverse` (#15, #16).** The first commands on that
+transport, and the template the irreversible ones (#18) reuse. The command
+layer owns the flow; the adapter owns the wire:
+
+1. Read fresh: teams, the roster, the league's slot counts.
+2. Diff the explicit target (`--set PLAYER=SLOT`) against that roster and
+   preflight it from the same read: eligibility, lock state, final slot
+   counts, duplicate or ambiguous players, and an empty diff, each a named
+   `CONFIG_INVALID` (`kind: "argument"`). The diff lives in the command, not
+   the adapter, because `--dry-run` and the preflight need it; the adapter
+   re-reads live and re-diffs before sending, so a world that moved in
+   between surfaces there or in the read-back.
+3. Check ownership against `session_role` again, so a refused team leaves no
+   journal row and `--dry-run` never plans for a team the tool will not write.
+4. `Journal.begin` with the prior slots, then one `set_lineup` call. An
+   identity `WRITE_DIVERGED` closes the entry `diverged`. A failure the
+   adapter marks `transaction_state: "unknown"` (a timeout, a 5xx, an
+   unreadable 200), or one outside the taxonomy, leaves it `pending`, because
+   nothing says whether it applied. Any other taxonomy error, such as ESPN's
+   409 or the adapter's live re-read finding the roster moved, is a known
+   no-send and closes it `rejected`. A journal that fails to close never
+   replaces the write's own error; it rides along in `details.journal`.
+5. Read back live and compare slot for slot. A match closes the entry
+   `executed` with ESPN's transaction id, `proposedDate`, and the echoed
+   member. A mismatch closes it `diverged` with what was observed, and raises
+   `WRITE_DIVERGED` carrying both ids. A read-back that fails outright is an
+   unverified success, not an error: ESPN did execute it.
+
+`journal reverse` is the same flow with the entry's `prior_state` as the
+target, journaled as kind `reverse` with `reverses` set, against the league
+profile whose id the entry names. It refuses add, drop, claim, and cancel
+entries as `NOT_AVAILABLE` before resolving a provider at all.
+
 ---
 
 ## 10. Reports — the layer that makes it worth owning
