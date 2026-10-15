@@ -4355,8 +4355,12 @@ fantasy-sports free-agents --pos RB --limit 5
 ### `WRITE_REJECTED` — exit 11
 
 A write that did not apply. One code for every reason, with the reason in
-`details.kind`: `roster_lock`, `not_owned`, `auth`, and the rest of ADR-0010's
-closed vocabulary. `details.provider_type` is ESPN's own `TRAN_*` string,
+`details.kind`, one of `roster_lock`, `slot_limit`, `same_slot`,
+`not_current_period`, `budget_exceeded`, `position_limit`, `already_dropped`,
+`roster_full`, `player_on_waivers`, `player_unavailable`, `not_owned`, `auth`,
+or `unknown` (ADR-0010's closed vocabulary; the README's
+[Writing](../README.md#write-errors-an-agent-branches-on) section says what to
+re-plan for each). `details.provider_type` is ESPN's own `TRAN_*` string,
 `remediation` is ESPN's message, and `details.transaction_applied` is always
 `false`: one ESPN transaction is validated and applied atomically, so a
 rejection changed nothing. A `not_owned` refusal is the tool's, before any

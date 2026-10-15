@@ -28,8 +28,11 @@ drift canary. Every command's output, in every mode, is in the
 [command reference](docs/commands.md). Writes cover the reversible kind,
 where `lineup set` changes your own team's lineup and `journal reverse` undoes
 it, and the irreversible kind: `add`, `drop`, and `claim`, each behind an
-acknowledgement flag (see [Writing](#writing)). Trades and pending-claim
-management are tracked in the [write-surface epic](https://github.com/jwulff/fantasy-sports/issues/105).
+acknowledgement flag, with `claims` and `cancel-claim` to manage the waiver
+queue (see [Writing](#writing)). Every write is journaled before it is sent
+and read back after. Trades are not built; they and the executing add and
+drop probes are tracked in the [write-surface
+epic](https://github.com/jwulff/fantasy-sports/issues/105).
 The package is not on PyPI (`0.1.0.dev0`); install from git as below.
 
 ## Install
@@ -187,6 +190,11 @@ fails if a committed sample no longer matches what the code renders.
 | [`raw`](docs/commands.md#raw) | One ESPN view passed straight through, payload unmodified |
 | [`doctor`](docs/commands.md#doctor) | Every health check: config, credentials, cache, journal, version, provider status |
 | [`lineup set`](docs/commands.md#lineup-set) | Move your own team's players to explicit slots, journaled and read back. **Writes** |
+| [`add`](docs/commands.md#add) | Add a free agent, optionally dropping a player. Irreversible; needs `--acknowledge-irreversible`. **Writes** |
+| [`drop`](docs/commands.md#drop) | Drop a player to waivers. Irreversible; needs `--acknowledge-irreversible`. **Writes** |
+| [`claim`](docs/commands.md#claim) | Submit a waiver claim, optionally with a bid and a drop. Irreversible; needs `--acknowledge-irreversible`. **Writes** |
+| [`claims`](docs/commands.md#claims) | A team's pending waiver claims by id, from ESPN's queue |
+| [`cancel-claim`](docs/commands.md#cancel-claim) | Withdraw a pending claim before it processes. **Writes** |
 | [`journal list`](docs/commands.md#journal-list) | The mutation journal, newest first: each write, who made it, how it ended |
 | [`journal digest`](docs/commands.md#journal-digest) | Journal entries since a time, newest first, for a cron job or agent to report |
 | [`journal show`](docs/commands.md#journal-show) | One journal entry in full: prior and applied state, acting member, cost |
@@ -419,6 +427,12 @@ them:
    so a prompt built from `data` can quote them without obeying them.
 6. **Run `doctor` before guessing.** It reports config, credentials, cache,
    and whether a known upstream issue is in progress, without touching ESPN.
+7. **Writes follow the loop in [Writing](#writing).** Read fresh, preview
+   with `--dry-run`, write, and check `read_back`. Branch on `WRITE_REJECTED`'s
+   `details.kind`. Never retry a result with `transaction_state: "unknown"`.
+   An irreversible write clears `/sanity-gate` first and passes
+   `--acknowledge-irreversible "<why>"` only on `PROCEED`. `--team` is always
+   the session's own team.
 
 A worked loop — read the current week's matchups, retrying only when the
 CLI says a retry can work:
@@ -466,9 +480,53 @@ Every field this loop reads is shown in the [command reference](docs/commands.md
 
 ## Writing
 
-`lineup set` is the first command that changes a league, and it is built to
-be run by an agent with nobody watching. There is no confirmation prompt and
-no dry-run default. What makes that safe is the shape of the loop:
+Six commands change a league: `lineup set`, `add`, `drop`, `claim`,
+`cancel-claim`, and `journal reverse`. `claims` and the other `journal`
+commands only read. They are built to be run by an agent with nobody watching, so
+there is no confirmation prompt and no dry-run default. What makes that safe
+is the shape of every loop: read, preview, write, then read it back. The
+irreversible ones add one step. The design is in
+[ARCHITECTURE §9](docs/ARCHITECTURE.md#9-readwrite-posture).
+
+### Rules for every write
+
+- **`--team` must be your own team.** The tool refuses any team the
+  configured ESPN session does not own, with `WRITE_REJECTED` kind
+  `not_owned`, before anything is sent or journaled. A commissioner's cookie
+  can move other managers' players on ESPN; this tool will not, and there is
+  no flag to make it. Reading another team is fine.
+- **Say where things end up, not how to get there.** A write is an explicit
+  target (`--set PLAYER=SLOT`, `--player P --drop D`). The command reads
+  fresh, works out the moves, and sends them as one transaction that ESPN
+  applies all or nothing.
+- **Everything the read can check is checked first.** An ineligible slot, a
+  locked player, an overfilled slot, a name that matches two players, a bid
+  in a league without FAAB: each is `CONFIG_INVALID` naming the cause, and
+  nothing is sent.
+- **`--dry-run` shows the exact moves and sends nothing.** It cannot tell you
+  whether ESPN would accept them, because ESPN has no validate-only mode, and
+  the output says so. It carries the credential age too, so a preflight shows
+  it.
+- **Every write is journaled before it is sent and read back after.** For a
+  lineup, an add, or a drop, a mismatch is `WRITE_DIVERGED`: do not retry,
+  read the roster and reconcile. `read_back.verified` is `true` on a clean
+  success, `false` when the read-back could not be made, and `null` for a
+  claim ESPN has not yet shown. `cancel-claim` is the exception: if ESPN
+  accepted the cancel but the claim is still queued, the result is a success
+  with `verified: false`, the claim id in `diverged`, and a warning to run
+  `claims` before acting again. It does not raise.
+- **Never retry an unknown outcome.** A timeout, a 5xx, or a response that
+  cannot be read arrives with `details.transaction_state: "unknown"`. The
+  write may have applied. Read `transactions` and `claims` first, because a
+  second claim is a second bid. The tool never retries a write itself.
+- **Watch `credentials.warning` on every write result.** It reports how old
+  the `espn_s2` cookie is, so an agent learns the cookie is ageing from a
+  success rather than from a failed write before a deadline. The cookie is
+  stored by `fantasy-sports auth login`, which takes both cookies together
+  (see [Credentials](#credentials)); `auth status` shows the age on demand.
+  Writes send `espn_s2` only, never the SWID.
+
+### Lineups: `lineup set` and `journal reverse`
 
 ```bash
 # 1. Read. 2. Preview, optionally. 3. Write. 4. Undo, if needed.
@@ -478,45 +536,22 @@ fantasy-sports lineup set --team "My Team" --set "Player A=BE" --set "Player B=W
 fantasy-sports journal reverse --id JOURNAL_ENTRY_ID
 ```
 
-- **Say where players end up, not how to get there.** Each `--set
-  PLAYER=SLOT` is a target. The command reads the roster, works out the
-  moves, and sends them as one transaction that ESPN applies all or nothing.
-  A target that already matches is refused.
-- **`--team` must be your own team.** The tool refuses any team the
-  configured ESPN session does not own, with `WRITE_REJECTED` kind
-  `not_owned`, before anything is sent or journaled. A commissioner's cookie
-  can move other managers' players on ESPN; this tool will not, and there is
-  no flag to make it.
-- **Everything the read can check is checked first.** An ineligible slot, a
-  player whose game has started, a slot the final lineup overfills, or a
-  name that matches two players is `CONFIG_INVALID` naming the player, and
-  nothing is sent.
-- **`--dry-run` shows the exact moves and sends nothing.** It cannot tell
-  you whether ESPN would accept them: ESPN has no validate-only mode, and
-  the output says so.
-- **Every write is journaled before it is sent and read back after.** The
-  journal entry holds the prior slots. After ESPN accepts, the roster is
-  re-read live and compared slot for slot; a mismatch is `WRITE_DIVERGED`,
-  which means do not retry, read the roster and reconcile. `read_back.verified`
-  is `true` on a clean success.
+- **A target that already matches is refused.** ESPN has no no-op
+  transaction. A lineup write is accepted only for the league's current
+  scoring period, so there is no `--week`.
 - **A lineup change can be reversed until kickoff.** `journal reverse --id`
   sends every player back to the slot the entry recorded, through the same
-  checks, and journals the reversal. An add, drop, or claim cannot be
-  reversed, and asking is `NOT_AVAILABLE` with nothing sent.
-- **Watch `credentials.warning` on every write.** Each result reports how old
-  the `espn_s2` cookie is, so an agent learns it is ageing from a success,
-  not from a failed write before a deadline.
+  checks, and journals the reversal. It is the only reversal there is: an
+  `add`, `drop`, `claim`, or `cancel-claim` entry is `NOT_AVAILABLE`, with
+  nothing sent.
 
-`journal list` shows every write this machine made, who ESPN says made it,
-and how it ended. `doctor` reports any entry still `pending`: a write that
-may have gone out without its outcome being recorded.
-
-### Irreversible writes: add, drop, claim
+### Irreversible writes: `add`, `drop`, `claim`
 
 A dropped player can be claimed by another team within seconds. A processed
 waiver claim spends priority and FAAB that restoring the roster does not give
-back. Nothing this tool does can undo either, so these three commands add one
-step to the loop, and an agent running them unattended follows it every time:
+back. An add that needs a drop inherits the drop's irreversibility. Nothing
+this tool does can undo any of them, so these three commands add one step to
+the loop, and an agent running them unattended follows it every time:
 
 ```bash
 # 1. Read. 2. Preview: items, cost, and exactly what cannot be undone.
@@ -530,28 +565,35 @@ fantasy-sports add --team "My Team" --player "Player C" --drop "Player A" --ackn
 - **No flag, no write.** Without `--acknowledge-irreversible "<why>"`, `add`,
   `drop`, and `claim` stop with `CONFIG_INVALID` and say what this move would
   lose: the dropped player goes to waivers, the claim spends priority and
-  FAAB. The reason is journaled verbatim and echoed as
-  `acknowledged_irreversible`, so a write nobody justified cannot hide.
+  FAAB. A blank reason counts as missing. The reason is journaled verbatim and
+  echoed as `acknowledged_irreversible`, so a write nobody justified cannot
+  hide.
 - **The flag is not the gate.** The CLI cannot run `/sanity-gate` or check
   that one ran. An autonomous agent clears the gate on the `--dry-run` output
   first and passes the flag only on `PROCEED`. The flag makes a skipped gate
   visible in the journal; it does not replace one.
 - **`--dry-run` needs no flag.** It reports the items, the `cost` (the bid,
-  the player displaced), and the same statement under
-  `irreversible_because`. It does not ask ESPN whether it would accept.
+  the player displaced), and the same statement under `irreversible_because`.
 - **Check `notified` after it fires.** With a `[notify]` command configured
   (below), `data.notified.ok` is `true` once the owner's hook ran. A failed
   notification never fails the write; treat `ok: false` as a reason to tell
   the owner some other way.
+- **Players must be where the command expects them.** `--player` is resolved
+  against this week's free-agent pool, and `--drop` against the team's roster.
+  An add of a player the pool shows on waivers is refused locally as
+  `CONFIG_INVALID` naming `claim`, and a claim of a free agent is refused the
+  same way, naming `add`. Nothing is sent. The `WRITE_REJECTED` kinds
+  `player_on_waivers` and `player_unavailable` appear only when the pool moved
+  after the read, so ESPN itself refused.
+- **`claim --bid` is for FAAB leagues only.** A league without an acquisition
+  budget rejects every bid, so a bid there is refused before sending. Omit
+  `--bid` for a bidless claim. A bid of 0 is a real bid in a FAAB league.
 - **A claim is pending, not done.** It returns `is_pending: true` and the
   transaction id, and the read-back finds that id in ESPN's waiver queue.
   `read_back.verified` is `null` when the claim cannot be seen, which means
   unverified, not missing.
-- **Never retry an unknown outcome.** A timeout is `PROVIDER_UNAVAILABLE`
-  with `transaction_state: "unknown"`. Read `claims` (and `transactions`)
-  before anything else, because a second claim is a second bid.
 
-### The claim lifecycle: claim, claims, cancel-claim
+### The claim lifecycle: `claim`, `claims`, `cancel-claim`
 
 A claim waits in ESPN's queue until waivers process. Until then it can be
 seen and withdrawn:
@@ -568,9 +610,10 @@ fantasy-sports cancel-claim --team "My Team" --id CLAIM_ID
 - **`claims` is ESPN's queue, not the transaction log.** A cancelled claim
   leaves it at once, while its own row in `transactions` keeps reading
   `PENDING`. Ask `claims` whether something is still queued. `--team`
-  defaults to your own team; another team's queue is readable too.
-- **`cancel-claim` takes only an id in your team's queue now.** Another
-  team's claim, one that already processed, or one already cancelled is
+  defaults to your own team; another team's queue is readable too. Each row
+  carries `processes_at`, which says how long you have to cancel.
+- **`cancel-claim` takes only an id in your team's queue.** Another team's
+  claim, one that already processed, or one already cancelled is
   `CONFIG_INVALID` pointing at `claims`, and nothing is sent.
 - **A cancel needs no `--acknowledge-irreversible`.** It spends no FAAB and no
   priority and changes no roster, so the owner's notify hook does not run for
@@ -580,6 +623,24 @@ fantasy-sports cancel-claim --team "My Team" --id CLAIM_ID
   `cancelled_claim_id`. `read_back.verified` is `true` once the claim is gone
   from the queue.
 - **Editing a bid is cancel, then claim again.** There is no edit in place.
+
+### The journal
+
+Every write attempt that gets past the preflight is one row in
+`$XDG_STATE_HOME/fantasy-sports/journal.sqlite`, written before the request
+and closed after it:
+
+| Command | What it shows |
+|---|---|
+| [`journal list`](docs/commands.md#journal-list) | Every write this machine made, newest first, who ESPN says made it, how it ended |
+| [`journal show --id`](docs/commands.md#journal-show) | One entry in full: prior and applied state, acting member, cost, the justification |
+| [`journal digest --since 24h`](docs/commands.md#journal-digest) | Entries recorded in a window, for a cron job or an agent to report |
+| [`journal reverse --id`](docs/commands.md#journal-reverse) | Undo a lineup entry |
+
+An entry ends `executed`, `rejected` (nothing applied), `diverged` (applied,
+and the read-back disagrees), or stays `pending`: a write whose outcome was
+never recorded, which `doctor` reports. The acting member appears as a
+pseudonym, never the SWID.
 
 ### Being told about irreversible writes
 
@@ -604,8 +665,8 @@ whether it is set, without running it.
 [`scripts/notify-irreversible-example.sh`](scripts/notify-irreversible-example.sh)
 appends one line per write to `$XDG_STATE_HOME/fantasy-sports/irreversible.log`.
 
-**Pull.** [`journal digest`](docs/commands.md#journal-digest) lists what was
-recorded in a window, for a cron job or an agent to render:
+**Pull.** `journal digest` lists what was recorded in a window. Windows are
+on when an entry began, so overlap them and de-duplicate on `id`:
 
 ```bash
 fantasy-sports journal digest --since 24h --irreversible
@@ -614,6 +675,43 @@ fantasy-sports journal digest --since 24h --irreversible
 Delivery to anything of your own, such as a task in a tracker or an entry in a
 notes vault, is a script of yours behind `irreversible_command` or after
 `journal digest`. It is deliberately not part of this package.
+
+### Write errors an agent branches on
+
+Two codes are specific to writes, on top of the table in
+[Errors](#errors). Both are non-retryable.
+
+**`WRITE_REJECTED`** (exit 11): the write was refused, by ESPN or by the tool
+before sending, and nothing applied. Branch on `details.kind`, then read
+`remediation`, which is ESPN's own message. `details.provider_type` is ESPN's
+`TRAN_*` string verbatim.
+
+| `kind` | Meaning | Re-plan |
+|---|---|---|
+| `roster_lock` | A player's game has started | Leave that player, or pick an unlocked one |
+| `slot_limit` | The final lineup overfills a slot | Re-read the roster and rebalance |
+| `same_slot` | A move put a player in the slot he already holds | Re-read and re-diff |
+| `not_current_period` | ESPN only accepts the current scoring period | Re-read the league's current week |
+| `budget_exceeded` | The bid is more than the FAAB left | Lower the bid |
+| `position_limit` | The roster position cap would be passed | Drop a player at that position |
+| `already_dropped` | The player is not on the team | Re-read the roster |
+| `roster_full` | No open spot | Add a `--drop` |
+| `player_on_waivers` | ESPN says not a free agent; the pool moved after the read | `claim` instead of `add` |
+| `player_unavailable` | On another team's roster | Pick someone else |
+| `not_owned` | The tool's own guard: `--team` is not yours | Use a team the session owns |
+| `auth` | The write host rejected the cookie | `auth status`, then `auth login` |
+| `unknown` | A reason not mapped yet | Read `provider_type` and `remediation` |
+
+`budget_exceeded` and `position_limit` are inferred from ESPN's vocabulary
+and have not been observed on the wire. A reason ESPN words differently, or
+adds later, arrives as `unknown` with its own string in `provider_type`. A write-host 401 is `kind: "auth"`,
+never `AUTH_EXPIRED`.
+
+**`WRITE_DIVERGED`** (exit 12): ESPN accepted the write and the roster read
+back differently, or the echoed member was not the one the tool checked. The
+write may have applied, so retrying could double-apply it. Read the roster,
+reconcile, and look at `details.expected` and `details.observed`. The journal
+entry is closed `diverged` and carries both.
 
 ## Credentials
 
@@ -657,7 +755,7 @@ the problem.
 
 | Provider | Status |
 |---|---|
-| ESPN | Supported (reads) |
+| ESPN | Supported (reads and writes) |
 | Sleeper | Designed for, not implemented |
 | Yahoo | Designed for, not implemented |
 

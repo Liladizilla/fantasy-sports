@@ -97,6 +97,13 @@ than with lineup changes because an add that requires a corresponding drop
 inherits the drop's irreversibility — the displaced player hits waivers and can be
 claimed by anyone.
 
+> **Amendment, 2026-10-15.** The order held and the wait did not. Lineup writes
+> shipped first, because their transport and journal are what everything else
+> rides on, and `add`, `drop`, `claim`, `claims`, and `cancel-claim` followed
+> within the same epic (#105) at John's request rather than a season later.
+> Trades are still unbuilt (#112). The surviving gate shipped as
+> `--acknowledge-irreversible`, described in `docs/ARCHITECTURE.md` §9.
+
 Both phases are wanted. The ordering is about which one absorbs the risk of an
 unproven write layer, not about which is more valuable.
 
@@ -238,8 +245,9 @@ standards do not relax to get there.
   read it, when the agent submits an explicit target lineup, then the tool re-reads
   the roster afterward and either confirms it matches the target exactly or fails
   with a distinct machine code reporting the observed divergence — and the journal
-  records both the intended and the observed state. ESPN offers no transaction
-  boundary, so partial application is reported, not prevented.
+  records both the intended and the observed state. One transaction is applied
+  atomically, so a divergence means the world moved, not that part of the write
+  landed. *(Amended 2026-10-15; see the note below.)*
 - AE3. **Covers R7, R8.** Given an agent has set a lineup, when John inspects
   the journal, then he sees the prior lineup and the applied one; when he
   reverses it, then the prior lineup is restored.
@@ -251,6 +259,17 @@ standards do not relax to get there.
   later."
 - AE6. **Covers R1.** Given any read command, when it returns successfully, then
   both the normalized rendering and the provider's raw payload are present.
+
+> **Amendment, 2026-10-15 (AE2).** This example originally ended "ESPN offers
+> no transaction boundary, so partial application is reported, not prevented."
+> That was an assumption made before the write surface was researched, and it
+> is wrong. A lineup write is one POST holding every changed slot, validated
+> against the final lineup and applied all or nothing (research brief 05 §0
+> row 3), so partial application does not occur. `WRITE_DIVERGED` still exists
+> and still matters, but it reports that the world moved between the read and
+> the write, or that the response's member was not the one the tool checked,
+> never a half-applied write. The rest of AE2 stands as shipped in `lineup
+> set` (#15).
 
 ---
 

@@ -1,7 +1,24 @@
 # ADR 0006: Read-only in v0.1; writes gated behind dry-run and confirmation
 
-**Status:** Partially superseded 2026-08-27 by `docs/brainstorms/2026-08-26-agent-managed-fantasy-leagues-requirements.md`
+**Status:** Superseded 2026-10-15 by [ADR-0010](0010-write-codes-one-code-with-a-kind-discriminator.md), the write-surface plan (`docs/plans/2026-10-14-001-feat-espn-write-surface-plan.md`), and `docs/brainstorms/2026-08-26-agent-managed-fantasy-leagues-requirements.md`; the shipped posture is `docs/ARCHITECTURE.md` §9
 **Date:** 2026-08-26
+**Superseded:** 2026-10-15 (was *Partially superseded 2026-08-27*)
+
+> **What shipped in place of the four gates (2026-10-15).** All four gates
+> below are gone as written, and the decision they served is settled: writes
+> exist, and nothing waited a season. Dry-run as the default, the printed diff,
+> and interactive confirmation were replaced by explicit target state, a
+> mutation journal written before the request and read back after it, and
+> reversal for lineups. The fourth gate, `/sanity-gate` for the irreversible
+> class, became `--acknowledge-irreversible "<why>"` on `add`, `drop`, and
+> `claim`: a CLI cannot invoke the gate or verify that a caller did, so the
+> flag refuses the write without a non-blank justification, states what cannot
+> be undone, and journals the justification verbatim, which makes a skipped
+> gate visible instead of preventing it. The prevention lives in the agent's
+> standing instructions (the README's "Writing" section). An ownership guard
+> with no override, an owner notification for every irreversible write that
+> took effect, and a credential-age warning on every result were added. Trades
+> remain unbuilt (#112).
 
 > **What was superseded.** Read-only v0.1 and the deferral of writes to v0.3 are
 > reversed: writes are core scope, because an interface that can only observe does

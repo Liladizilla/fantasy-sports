@@ -5,7 +5,7 @@
 **Author:** John Wulff (with Claude)
 
 An agent-native CLI for fantasy sports leagues. ESPN first, provider-agnostic by
-construction. Read-only in v0.1.
+construction. Reads and writes for ESPN as of v0.1; the write surface is §9.
 
 ---
 
@@ -321,7 +321,11 @@ body `memberId` are both optional (`docs/research/05-espn-write-surface.md`
 §2.2, §6.3). So the write path puts exactly one secret on the wire, sends no
 `memberId`, and the SWID is used only locally — to find the session's own
 member in `mNav`, compared against the cache's pseudonym of it, so it never
-reaches a request body or a result either (#107).
+reaches a request body or a result either (#107). The member id reported
+anywhere, in a result, the journal, or an error, is the cache's per-store
+pseudonym of it, never the GUID. Every write result also carries the
+`espn_s2` age (§9), and `auth login` stores both cookies together so the pair
+cannot belong to two accounts.
 
 ---
 
@@ -384,61 +388,131 @@ SQLite at `~/.cache/fantasy-sports/`, TTL by resource type:
 
 ## 9. Read/write posture
 
-**Superseded by `docs/brainstorms/2026-08-26-agent-managed-fantasy-leagues-requirements.md`.**
-Writes are core scope, not a deferred phase — an interface that can only observe
-does not manage anything. `--dry-run` is an opt-in flag rather than the default,
-because a synchronous confirmation prompt cannot be satisfied by an unattended
-process and so converts unattended operation into failure rather than safety.
+**Shipped, and it replaces ADR-0006.** Writes are core scope, not a deferred
+phase: an interface that can only observe does not manage anything. The
+requirements doc (`docs/brainstorms/2026-08-26-agent-managed-fantasy-leagues-requirements.md`)
+removed ADR-0006's three interactive gates, and the write-surface epic (#105)
+built what stands in their place. `--dry-run` is an opt-in flag rather than the
+default, because a synchronous confirmation prompt cannot be satisfied by an
+unattended process and so converts unattended operation into failure rather
+than safety. What replaces the prompt is a set of controls that work with
+nobody watching:
 
-What replaces the removed gates: explicit-state operations, a mutation journal
-recording prior state, and reversal where the provider permits it.
+1. **Explicit target state.** A write says where things should end up, never
+   how to get there.
+2. **An ownership guard** that makes `--team` mean "which of *my* teams".
+3. **A mutation journal** written before the request and closed after it.
+4. **A read-back** of every write, with a machine code for a mismatch.
+5. **Reversal where the provider permits it**, which is lineups only.
+6. **An acknowledgement flag and an owner notification** for the irreversible
+   class, which cannot be reversed at all.
 
-**Open, and load-bearing:** reversal is NOT available for every write. Drops,
-processed waiver claims, and trades cannot be undone, and even a lineup change
-locks at kickoff. ADR-0006's fourth gate — routing autonomous writes through
-`/sanity-gate` — was never superseded and still stands for that irreversible
-class. See ADR-0006 and the requirements doc; both need amendment.
+The reversibility line is the organising fact. A lineup change is reversible
+until kickoff and the journal can restore it. A drop is not: the player is on
+waivers and anyone can claim him within seconds. A processed waiver claim
+spends priority and FAAB that restoring the roster does not return. An add
+that needs a drop inherits the drop's irreversibility. Trades need the
+counterparty and are not built (#112).
 
-**The write transport (#107).** Every write goes through one method on the
-adapter that refuses before it builds, sends once, and maps everything that
-comes back:
+### The write transport (#107)
+
+Every write goes through one method on the adapter (`WritingProvider`, a
+second Protocol beside `Provider`, so a read-only adapter still conforms). It
+refuses before it builds, sends once, and maps everything that comes back:
 
 - **Ownership is refused client-side, before a body exists.** `session_role`
   reads `mNav` (`isLeagueCreator` *and* `isLeagueManager`) and the session's
   `teams[].owners`; a `team_id` outside that set is `WRITE_REJECTED`
   `kind: "not_owned"`, regardless of role, and ownership that cannot be
-  determined is refused the same way. There is no override parameter. A
-  commissioner's cookie is honoured by ESPN on another manager's team
-  (brief §6), so this guard is the only thing that keeps `--team` meaning
-  "which of *my* teams".
+  determined is refused the same way (refuse-closed). **There is no override
+  parameter and no flag.** The reason is the commissioner's cookie: ESPN
+  honoured a cross-team lineup write on it with `isLeagueManager: false` in
+  the body (brief 05 §6), so ESPN will not stop a `--team` typo and this guard
+  is the only thing that does. Whether ESPN honours commissioner authority on
+  `FREEAGENT` or `WAIVER` is unknown, and is never probed in a real league.
+  Commands check ownership once more before they journal, so a refused team
+  leaves no journal row and `--dry-run` never plans for a team the tool will
+  not write.
 - **The writing session must be the owning one.** Ownership comes from the
-  SWID; ESPN authenticates the write as `espn_s2`. The `memberId` a write
-  echoes is checked against the guard's member: a mismatch is
-  `WRITE_DIVERGED` for that write and refuses every later one. A hand-split
-  pair is therefore caught after its first write, not before; `auth login`
-  stores both together and `doctor` warns when they come from different
-  links.
-- **A timeout is not a failure.** The POST has a 15 s timeout (over a
-  hundred times the observed latency) and is sent exactly once. A timeout or
-  connection error after sending is `PROVIDER_UNAVAILABLE` with
-  `details.transaction_state: "unknown"` and a remediation to read
-  `transactions` (and `claims`) before retrying: a blind retry of a lineup is
-  harmless, a blind retry of a waiver claim is a double spend (brief §8 item
-  1). There is no retry loop on the write path.
+  SWID; ESPN authenticates the write as `espn_s2`, and the credential chain
+  resolves the two independently. The `memberId` a write echoes is checked
+  against the member the guard checked: a mismatch is `WRITE_DIVERGED` for
+  that write and refuses every later one in the process. A hand-split pair is
+  therefore caught after its first write, not before; `auth login` stores both
+  cookies together and `doctor` warns when they resolve from different links.
+- **A write is one POST, and one POST is atomic.** A lineup change is a
+  single transaction with many items, validated against the final lineup and
+  applied all or nothing (brief 05 §0 row 3). So a rejection applied nothing,
+  and a divergence means the world moved between the read and the write, not
+  that half of a write landed. The earlier wording, "partial application is
+  reported, not prevented", described a risk the transport does not have.
+- **A timeout is not a failure.** The POST has a 15 s timeout (over a hundred
+  times the observed latency) and is sent exactly once. A timeout, a
+  connection error, a 5xx, or a 200 whose body cannot be read is
+  `PROVIDER_UNAVAILABLE` or `SCHEMA_DRIFT` with `details.transaction_state:
+  "unknown"`, and the remediation says to read `transactions` and `claims`
+  before doing anything else. No exception from the POST proves that nothing
+  applied, so none is ever retried: a blind retry of a lineup is harmless, a
+  blind retry of a waiver claim is a double spend (brief 05 §8 item 1). There
+  is no retry loop on the write path, and the journal entry stays `pending`.
 - **The cache is coherent after a success.** A `200` purges every entry
   tagged with this league and this scoring period through
-  `CacheStore.purge_by_league_tag` — before the response is parsed, since the
-  write applied whether or not its body is readable — and drops the memoised
+  `CacheStore.purge_by_league_tag`, before the response is parsed, since the
+  write applied whether or not its body is readable, and drops the memoised
   league so the next read re-bootstraps. Season-scoped entries are untouched.
-- **Every result carries credential age** (`credentials:
-  {espn_s2_age_seconds, warning}`), computed before the request from the same
-  staleness report `auth status` renders.
+- **Writes send `espn_s2` only** (§6), and the member id reported anywhere is
+  the cache's pseudonym, never the SWID.
+- **Every result carries credential age** (R12a): `credentials:
+  {espn_s2_age_seconds, warning}`, computed before the request from the same
+  staleness report `auth status` renders, and present on `--dry-run` too. An
+  agent learns its cookie is ageing from a success, not from the 401 before a
+  deadline.
+- **A write-host 401 is never `AUTH_EXPIRED`** (§5): it is `WRITE_REJECTED`
+  `kind: "auth"`.
 
-**`lineup set` and `journal reverse` (#15, #16).** The first commands on that
-transport, and the template the irreversible ones (#18) reuse. The command
-layer owns the flow; the adapter owns the wire:
+### The journal (#16)
 
-1. Read fresh: teams, the roster, the league's slot counts.
+`core/journal.py`, standard library only, a SQLite file at
+`$XDG_STATE_HOME/fantasy-sports/journal.sqlite` (file `0600`, directory
+`0700`). It is the control that stands in for the removed confirmation prompt,
+and it only works if John can ask "what did my agent do, acting as whom, and
+what did it cost?" and get an answer from a file the agent could not skip
+writing.
+
+- **Two phases.** `begin()` stores the intent, the prior state, and the
+  request *before* anything is sent. `complete()`, `reject()`, and `diverge()`
+  close it. A process that dies in between leaves a `pending` row that
+  `doctor` reports. A write that cannot be journaled does not proceed, the
+  opposite of the response cache, which degrades to a live fetch.
+- **Attribution comes from the response, never the request**, and it is a
+  pseudonym: ESPN's `memberId` *is* the account's SWID (brief 05 §2.3), so the
+  journal stores the same keyed-BLAKE2b pseudonym the cache uses, under a
+  salt kept in the journal file. The join to ESPN's own ledger is the
+  transaction id and `proposedDate`, which are stored verbatim.
+- **What closes how.** A clean read-back is `executed`. A read-back mismatch or
+  an identity mismatch is `diverged`, with the observed state and the error
+  stored beside it. A known no-send, such as ESPN's 409, a 429, or the
+  adapter finding the roster moved, is `rejected`. Only a failure marked
+  `transaction_state: "unknown"` leaves the row `pending`. A journal that
+  fails while recording a failed write never replaces that write's error; it
+  rides in `details.journal`.
+- **Reversal is for lineups only.** `journal reverse --id` sends an executed
+  or diverged lineup entry's `prior_state` back as the target, through the same
+  checks, journaled as kind `reverse` with `reverses` set. An add, drop,
+  claim, or cancel entry is `NOT_AVAILABLE` before a provider is resolved:
+  the `reversible` field is decided per kind by the command, never a
+  constant. Undoing a claim is `cancel-claim` while it is pending; undoing a
+  cancel is a new claim.
+- **Reading it**: `journal list`, `journal show`, and `journal digest`, all
+  read-only and `takes_league=False`.
+
+### `lineup set` (#15)
+
+The first command on the transport and the template the rest reuse. The
+command layer owns the flow; the adapter owns the wire.
+
+1. Read fresh: teams, the roster, the league's slot counts, whatever `--fresh`
+   says.
 2. Diff the explicit target (`--set PLAYER=SLOT`) against that roster and
    preflight it from the same read: eligibility, lock state, final slot
    counts, duplicate or ambiguous players, and an empty diff, each a named
@@ -446,54 +520,115 @@ layer owns the flow; the adapter owns the wire:
    the adapter, because `--dry-run` and the preflight need it; the adapter
    re-reads live and re-diffs before sending, so a world that moved in
    between surfaces there or in the read-back.
-3. Check ownership against `session_role` again, so a refused team leaves no
-   journal row and `--dry-run` never plans for a team the tool will not write.
-4. `Journal.begin` with the prior slots, then one `set_lineup` call. An
-   identity `WRITE_DIVERGED` closes the entry `diverged`. A failure the
-   adapter marks `transaction_state: "unknown"` (a timeout, a 5xx, an
-   unreadable 200), or one outside the taxonomy, leaves it `pending`, because
-   nothing says whether it applied. Any other taxonomy error, such as ESPN's
-   409 or the adapter's live re-read finding the roster moved, is a known
-   no-send and closes it `rejected`. A journal that fails to close never
-   replaces the write's own error; it rides along in `details.journal`.
+3. Check ownership against `session_role`.
+4. `Journal.begin` with the prior slots, then one `set_lineup` call, closed as
+   described above.
 5. Read back live and compare slot for slot. A match closes the entry
    `executed` with ESPN's transaction id, `proposedDate`, and the echoed
-   member. A mismatch closes it `diverged` with what was observed, and raises
-   `WRITE_DIVERGED` carrying both ids. A read-back that fails outright is an
-   unverified success, not an error: ESPN did execute it.
+   member. A mismatch closes it `diverged` and raises `WRITE_DIVERGED`
+   carrying both ids. A read-back that fails outright is an unverified
+   success, `read_back.verified: false` with a warning, not an error: ESPN did
+   execute it.
 
-`journal reverse` is the same flow with the entry's `prior_state` as the
-target, journaled as kind `reverse` with `reverses` set, against the league
-profile whose id the entry names. It refuses add, drop, claim, and cancel
-entries as `NOT_AVAILABLE` before resolving a provider at all.
+### `add`, `drop`, `claim` (#18)
 
-**`add`, `drop`, `claim` (#18).** The irreversible class, on the same flow
-(`execute_move` in `commands/moves.py`; the ownership check and the
-journal-closing helpers are shared with `lineup set` in `commands/writes.py`).
-What differs:
+The irreversible class, on the same flow (`execute_move` in
+`commands/moves.py`; the ownership check and the journal-closing helpers are
+shared with `lineup set` in `commands/writes.py`). What differs:
 
-- **An acknowledgement gate before the journal.** Without
-  `--acknowledge-irreversible "<why>"` the command is `CONFIG_INVALID`
-  (`kind: "argument"`) stating what this invocation cannot undo. The reason is
-  journaled in `request` and echoed in `data.acknowledged_irreversible`.
-  ADR-0006's fourth gate survives this way: the CLI cannot run
-  `/sanity-gate` or verify it ran, so it makes a bypass visible instead, and
-  the README tells an autonomous agent to clear the gate before the flag.
+- **`--acknowledge-irreversible "<why>"` is the enforcement point.** Without a
+  non-blank reason the command is `CONFIG_INVALID` (`kind: "argument"`),
+  stating exactly what this invocation cannot undo, before anything is
+  journaled or sent. The reason is journaled verbatim in `request` and echoed
+  in `data.acknowledged_irreversible`. `--dry-run` needs no flag and reports
+  the cost and `irreversible_because`.
+- **The honest limit.** A CLI cannot invoke `/sanity-gate` and cannot verify
+  that a caller did. ADR-0006's fourth gate survives as far as it can be
+  enforced: the tool makes a skipped gate *visible*, because a write made
+  without one carries a justification John can read after the fact, rather
+  than none. The gate itself is enforced where it can be, in the agent's
+  standing instructions (the README's "Writing" section, and the
+  `/sanity-gate` rule in John's global `CLAUDE.md`). A flag an agent passes
+  by reflex defeats the visibility, which is why the justification is
+  journaled instead of discarded.
 - **The preflight reads the free-agent pool.** `--player` must be in this
-  week's pool; ESPN's pool status refuses an add of a player on waivers and a
-  claim of a free agent before anything is sent.
-- **The journal records the cost**: `reversible: false`, `cost.bid_amount`,
-  `cost.displaced_player_id`, the dropped player's slot and the added
-  player's pool status as `prior_state`.
-- **Read-back follows `is_pending`.** An executed move re-reads the roster
-  (added present, dropped absent, else `WRITE_DIVERGED`). A pending claim
-  looks for its row in `transactions`; since the normalized row carries no
-  ESPN transaction id, not finding it is `verified: null`, never a
-  verification.
-- **The owner is told** (#113): after the entry closes `executed` or
-  `diverged`, `notify_irreversible` runs with the stored entry. Its result is
-  `data.notified`, or `details.notified` on a `WRITE_DIVERGED`; it never
-  fails the write.
+  week's 500-player pool, so an add can never take another team's player by
+  id. The pool's status refuses an add of a player on waivers and a claim of
+  a free agent before anything is sent, as `CONFIG_INVALID` naming the command
+  to use instead; `player_on_waivers` and `player_unavailable` reach an agent
+  only when the pool moved after the read and ESPN refused.
+  Status is ESPN's acquisition state read from `raw`, used only to refuse.
+- **The FAAB preflight.** `claim --bid` reads
+  `settings.acquisitionSettings.isUsingAcquisitionBudget` from the league the
+  read already memoised, at no cost. A bid in a league without an acquisition
+  budget is refused as `CONFIG_INVALID` before sending, in `--dry-run` too,
+  because ESPN rejects every bid there (`TRAN_ACQUISITION_BUDGET_NOT_SUPPORTED`,
+  even for `1`). A bidless claim sends no `bidAmount` (`waiver=True`); a FAAB
+  league legitimately takes a bid of 0, so 0 never means "omit".
+- **The envelope follows the shape.** `add` is `FREEAGENT` with exactly one
+  `ADD`. A drop on its own is `ROSTER`, because `FREEAGENT` must carry exactly
+  one `ADD` (brief 06 §0 row 4). `claim` is `WAIVER`. The journal records
+  `reversible: false`, `cost.bid_amount`, and `cost.displaced_player_id`.
+- **Read-back follows `is_pending`, not the command.** An executed move
+  re-reads the roster: the added player present, in `--slot` when one was
+  named, the dropped player absent, else `WRITE_DIVERGED`. A pending claim,
+  the normal answer to a claim, is looked up by ESPN's transaction id in
+  `mPendingTransactions`. A hit is `verified: true`, `matched_by` the id. Not
+  listed is `verified: null` with a note, never `true`, and `queue_size` says
+  whether the queue was empty. The earlier match against `transactions` by
+  team, player, and bid was removed: a cancelled claim's row there reads
+  `PENDING` forever and verified a claim ESPN had not shown.
+- **The owner is told** (R7a, #113). After an irreversible entry closes
+  `executed` or `diverged`, `notify_irreversible` (`reports/notify.py`) runs
+  the configured `[notify] irreversible_command` once, with the stored,
+  already-redacted entry as JSON on stdin. The result is `data.notified`, or
+  `details.notified` on a `WRITE_DIVERGED`. It never raises and never fails or
+  undoes the write: a missing command, a non-zero exit, and a timeout are
+  values in the result, and a timeout kills the whole process group. A
+  rejected write applied nothing and is not announced; a `pending` one has
+  not ended. This package ships the mechanism and knows nothing about any
+  vault or tracker; delivery is the owner's script. The pull side is
+  `journal digest --since <24h|7d|ISO-8601> [--irreversible]`, for a cron job
+  to render. `doctor` reports whether the hook is set without running it.
+
+### The waiver queue (#109)
+
+`claims [--team T]` lists a team's pending claims from
+`view=mPendingTransactions`, by ESPN's transaction id; `cancel-claim --team T
+--id ID` withdraws one. (It is `cancel-claim`, not `claim cancel`, because a
+typer group named `claim` shadows the top-level `claim` command.) The queue
+view, not `mTransactions2`, because a cancelled claim leaves the queue at once
+while its own `mTransactions2` row keeps reading `PENDING`. A body without the
+`pendingTransactions` key is `SCHEMA_DRIFT`, not an empty queue, since an
+empty queue invites a duplicate claim.
+
+An id that is not in the owning team's queue is `CONFIG_INVALID` and never
+sent; an unowned `--team` is `not_owned`. A cancel needs no
+`--acknowledge-irreversible`: it spends nothing and a resubmitted claim
+restores what it withdrew. It is still reported `reversible: false`, because
+the tool cannot un-cancel, and it is journaled as kind `cancel` with the
+cancel's own new id as `provider_transaction_id` and the claim's as
+`cancelled_claim_id`. Its read-back re-reads the queue and reports rather than
+raises: ESPN did accept the cancel.
+
+### Testing and what is proven
+
+Write tests never touch ESPN. Unit tests inject `http_post` and replay bodies
+captured against league `99` through `WritableEspn` (`tests/_harness.py`),
+which plays the write host and applies, ignores, or rejects a POST. No
+committed fixture asserts that ESPN refuses a cross-team write, because that
+behaviour is unverified; the guard's test is a unit test of the guard
+(`docs/memory/espn-lineup-write-authority-is-broader-than-team-ownership.md`).
+Live write tests are marked `live` and need a second, deliberate opt-in:
+`FANTASY_SPORTS_ESPN_WRITE_LEAGUE` must be set *and equal*
+`FANTASY_SPORTS_ESPN_LEAGUE`, and both must name the throwaway test league.
+
+What has run against real ESPN: a lineup swap and its reversal (in the test
+league), a bidless claim, its listing, and its cancel (in the test league),
+and brief 05's captures. What has not: an executing `FREEAGENT` add or a
+standalone drop. The test league's pool sat on waivers when the shapes were
+captured, so those success bodies are hand-built in the captured shape, and
+#108 stays open for the executing probes.
 
 ---
 
@@ -698,13 +833,24 @@ fantasy-sports matchups  --week N
 fantasy-sports transactions --limit N
 fantasy-sports free-agents --pos WR --limit N
 fantasy-sports raw --view mSettings [--view ...]
+fantasy-sports lineup set --team <id|name> --set PLAYER=SLOT [--dry-run]
+fantasy-sports add       --team <id|name> --player P [--drop D] [--slot S]
+fantasy-sports drop      --team <id|name> --player P
+fantasy-sports claim     --team <id|name> --player P [--bid N] [--drop D]
+fantasy-sports claims    [--team <id|name>]
+fantasy-sports cancel-claim --team <id|name> --id CLAIM_ID
+fantasy-sports journal list | show | digest | reverse
 ```
 
-ESPN only · read-only · JSON/table/CSV · multi-league config · SQLite cache ·
-cassette tests · live canary in CI · health manifest + client-side check.
+(`add`, `drop`, and `claim` also take `--acknowledge-irreversible "<why>"` and
+`--dry-run`. The writes are §9.)
 
-**Out of scope for v0.1:** writes, Yahoo, Sleeper, MCP server, cross-provider
-player IDs, draft tooling, projections.
+ESPN only · reads and writes · JSON/table/CSV · multi-league config · SQLite
+cache · mutation journal · cassette tests · live canary in CI · health
+manifest + client-side check.
+
+**Out of scope for v0.1:** trades (#112), the MCP server (#111), Yahoo,
+Sleeper, cross-provider player IDs, draft tooling, projections.
 
 ---
 
@@ -712,15 +858,17 @@ player IDs, draft tooling, projections.
 
 | Version | Contents |
 |---|---|
-| **v0.1** | ESPN reads, cache, config, drift detection, `doctor` — plus writes, pending the write-surface spike below |
+| **v0.1** | ESPN reads, cache, config, drift detection, `doctor`, and **writes**: `lineup set`, `add`, `drop`, `claim`, `claims`, `cancel-claim`, the mutation journal, and `journal reverse` (epic #105, §9) |
+| **Still open on v0.1's write surface** | The executing `FREEAGENT` probes against a throwaway league (#108); trade proposals, acceptance, and cancellation (#112) |
 | **v0.2** | `reports/` — start-sit memo, weekly recap, vault output |
-| **v0.3** | `mcp serve` adapter over the same registry |
+| **v0.3** | `mcp serve` adapter over the same registry (#111) |
 | **v0.4+** | Second provider, only when a real need appears |
 
-**Blocking prerequisite:** `espn-api` is read-only — every live call is a `GET`
-against `lm-api-reads.fantasy.espn.com`. The ESPN write surface (host, transaction
-payload shape, headers, per-operation error vocabulary) is unresearched and must
-be reverse-engineered before writes can be treated as schedulable work.
+**The write-surface spike is done.** `espn-api` is read-only, so the write host,
+transaction shapes, headers, and rejection vocabulary were reverse-engineered
+from captured traffic: lineups in brief 05 (#14) and add, drop, waiver, and
+cancel in brief 06 (#108, partial). Nothing about the write surface remains
+unresearched except what §9's last subsection lists as not yet run.
 
 ---
 
@@ -830,8 +978,8 @@ above and are binding.
    source reviewed.
 
 10. **There is no programmatic auth to design toward, ever.** ESPN closed the
-    username/password path. v0.3 writes will still require a human-extracted
-    cookie.
+    username/password path. Writes still require a human-extracted cookie, so
+    cookie age is reported on every write result (§9).
 
 ### From the provider data-shapes brief (`02`)
 
@@ -865,6 +1013,51 @@ second provider arrives.
     a full tiebreaker cascade locally. Copying that into `core/` as "the"
     standings algorithm builds logic Yahoo does not need and will disagree with.
     Keep it in the ESPN adapter.
+
+### From the write-surface briefs (`05`, `06`)
+
+Two briefs, probed against real ESPN on 2026-09-12 and 2026-10-15, changed
+§5, §6, and §9. These are the facts that moved the design.
+
+16. **The cookie's authority is the commissioner's, and ESPN does not check
+    ownership.** The session honoured a cross-team lineup write with
+    `isLeagueManager: false` in the body. Ownership is therefore a client-side
+    guard with no override (§9), and commissioner authority is two flags in
+    `mNav`, `isLeagueCreator` and `isLeagueManager`, not one (05 §7).
+17. **The member id on the wire is the SWID, and reads show a pseudonym.** A
+    command's reads go through a cache that rewrites every SWID in a body, so
+    matching the raw SWID against `mNav` owns nothing. The guard matches both
+    spellings and reports the pseudonym; the write response is scrubbed with
+    the same salt so the echoed `memberId` joins to the session's.
+18. **`espn_s2` alone authorizes a write**, and a write-host 401 is a single
+    constant for every cause, so it is `WRITE_REJECTED` `kind: "auth"` and
+    never `AUTH_EXPIRED` (05 §2.2, §5.1).
+19. **A transaction is atomic, and a lineup write must contain only the slots
+    that change.** A from-equals-to item rejects the whole transaction
+    (`TRAN_ROSTER_SAME_SLOT`). Explicit target state is therefore a diff and
+    one POST, and a single POST has no partial application (05 §0 row 3).
+20. **Lineup writes are accepted only for the current scoring period**
+    (`TRAN_INVALID_SCORINGPERIOD_NOT_CURRENT`), so there is no `--week` on a
+    write.
+21. **`mPendingTransactions` is the queue; `mTransactions2` is the log.** A
+    cancelled claim leaves the queue at once, and its own `mTransactions2` row
+    reads `PENDING` forever, with a separate `CANCELED` row pointing at it.
+    `espn-api` also drops ESPN's transaction id on the read side, so only the
+    queue view can join a claim to the id a write returned (06 §0 rows 7, 8).
+22. **A league without FAAB rejects every bid, even `1`.** A claim there must
+    omit `bidAmount`, while a FAAB league legitimately takes a bid of 0, so
+    "bid 0" cannot mean "no bid". The adapter takes a `waiver=True` flag, and
+    the command refuses a bid against a budgetless league before sending
+    (06 §0 row 9).
+23. **Drop-only is `ROSTER`, not `FREEAGENT`.** `FREEAGENT` must carry exactly
+    one `ADD` (`TRAN_INVALID_ITEM_TYPE_COUNT`). That a standalone drop
+    executes as `ROSTER` is strongly indicated, not observed (06 §0 row 4).
+24. **ESPN checks availability before roster size, and a freshly drafted
+    league has no free agents.** Every unrostered player is on waivers until
+    the first run after the draft, so a `FREEAGENT` add fails whatever its
+    shape. Two rejections ask for different re-plans and got their own
+    `kind`: `player_on_waivers` (claim instead) and `player_unavailable`
+    (pick someone else), per ADR-0010 (06 §0 rows 10, 11).
 
 ## 15. Open questions
 

@@ -3,7 +3,7 @@
 ## Project Overview
 
 An agent-native CLI for fantasy sports leagues. ESPN first, provider-agnostic by
-construction, read-only in v0.1. Python 3.12+, distributed via
+construction. Reads and writes (lineups, adds, drops, waiver claims) in v0.1. Python 3.12+, distributed via
 `uv tool install fantasy-sports`.
 
 The full design and its rationale live in **`docs/ARCHITECTURE.md`** — read it

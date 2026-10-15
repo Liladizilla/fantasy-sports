@@ -2,7 +2,7 @@
 
 **Found:** 2026-10-15, building `add`/`drop`/`claim` (#18). **Applies to:**
 anything that joins a write's `provider_transaction_id` to the read side:
-`claims` and `claim cancel` (#109), a pending-claim read-back, reconciling a
+`claims` and `cancel-claim` (#109), a pending-claim read-back, reconciling a
 `pending` journal row after a timeout.
 
 A write answers with ESPN's transaction UUID (`WriteResult.provider_transaction_id`,
@@ -12,7 +12,8 @@ journaled as the join key). The read side never shows it. `espn-api`'s
 `_transaction()` builds `provider_id` as `f"{type}-{scoring_period}"`.
 Every waiver claim in a period has the same `provider_id`.
 
-So #18's claim read-back matches a pending row on everything the claim
+So #18's first claim read-back matched a pending row (superseded in #109, see
+"Done in #109" below) on everything the claim
 submitted: type, team, the exact adds and drops, the bid (ESPN records a
 bidless claim as `0`), and `raw.status == "PENDING"`. It reports `matched_by`
 for exactly one match. No match, or several identical ones, is
@@ -20,7 +21,7 @@ for exactly one match. No match, or several identical ones, is
 match, and an id join would not.
 
 **For #109:** a `claims` command that lists pending claims *by id*, which is
-what `claim cancel` takes, has to read ESPN's body itself rather than go
+what `cancel-claim` takes, has to read ESPN's body itself rather than go
 through `league.transactions()`. Do it inside the adapter, and normalize the
 id onto the row, so the command layer never parses ESPN's body. Prefer
 `view=mPendingTransactions` (#121 captured it): a cancelled claim leaves it

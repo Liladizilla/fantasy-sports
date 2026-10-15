@@ -18,9 +18,10 @@ Unit tests never touch the network. `pytest-socket` is enabled through
 and §8 covers *which* recorded response a hit gets, which is a separate
 question with its own failure mode.
 
-Two more sections carry rules rather than descriptions: **§6 is what may and may
-not be committed**, and **§7 is the re-record procedure**. Read both before
-adding a fixture.
+Writes do not fit the table: nothing records them, and §9 says what stands in
+for a cassette. Two more sections carry rules rather than descriptions: **§6 is
+what may and may not be committed**, and **§7 is the re-record procedure**.
+Read both before adding a fixture.
 
 ---
 
@@ -358,3 +359,53 @@ through the whole stack to assert which one it is.
 Both are held by tests in `tests/unit/test_scrubbing.py` and
 `tests/unit/test_cassette_harness.py`; the reasoning is in
 `docs/memory/cassette-scrubbing-blind-spots.md`.
+
+---
+
+## 9. Write tests
+
+A write never reaches ESPN from a unit test, and there is no cassette of one.
+Reads replay recordings. A POST goes to something else, for three reasons: a
+cassette would record a transaction that changed a real league, a write's
+answer depends on the request body, and the interesting write behaviour is
+what the tool does with each answer rather than the answer itself.
+
+- **An injected `http_post`.** `EspnProvider(..., http_post=...)` is the seam
+  for the write host, the way `http=` is for reads. It resolves at call time,
+  so the default, `requests.post`, is imported inside the method and
+  `--help` never pays for it (`docs/memory/default-args-defeat-monkeypatch.md`
+  is why the default cannot be bound in the signature). Every write test
+  hands it a fake that records the body it was sent, so a test can assert the
+  exact request and that nothing was sent when a guard refused.
+- **`WritableEspn`** (`tests/_harness.py`) is the synthetic league plus a write
+  host that changes what later reads return. Its `mode` is `apply` (the body
+  takes effect), `ignore` (the same 200 with nothing changed, so the
+  read-back diverges), or `reject` (a 409). It plays `ROSTER`, `FREEAGENT`,
+  `WAIVER`, and `CANCEL` bodies, keeps the pending queue that
+  `mPendingTransactions` serves, and can echo another member to play a write
+  applied by a different account. Commands are tested through the real
+  adapter on top of it, not through a fake provider, so the guard, the
+  journal, and the read-back are all exercised together.
+- **The bodies are capture-derived, against league `99`.** Rejections and
+  lineup successes replay the redacted captures in
+  `docs/research/05-espn-write-surface/` and
+  `docs/research/06-espn-add-drop-surface/` verbatim, with the league id
+  already rewritten to the invented one (§6). The success answers for
+  `FREEAGENT` adds and standalone drops are the exception: the test league's
+  pool sat on waivers when it was captured, so those are hand-built in the
+  captured shape, and the docs and samples say so. #108 stays open for the
+  executing probes.
+- **The live double opt-in.** A `live` write test runs only when
+  `FANTASY_SPORTS_ESPN_WRITE_LEAGUE` is set **and equals**
+  `FANTASY_SPORTS_ESPN_LEAGUE`, because the read-only live suite points the
+  second variable at whatever league is handy, possibly a real one. Both must
+  name the throwaway test league. Each live write test uses a temporary XDG
+  tree for its journal and cache and cleans up from a fresh roster read, never
+  from the failed command's report. See `tests/live/README.md`.
+- **No committed fixture asserts that ESPN refuses a cross-team write.** ESPN
+  honoured one on the commissioner's cookie, whether it refuses it for an
+  ordinary member is unverified, and a cassette saying "rejected" would turn
+  a guess into a passing test
+  (`docs/memory/espn-lineup-write-authority-is-broader-than-team-ownership.md`).
+  The ownership guard is tested as what it is, a unit test of the guard: an
+  unowned team is `WRITE_REJECTED` `not_owned` and no POST was made.
