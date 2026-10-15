@@ -129,6 +129,7 @@ from fantasy_sports.core.models import (
     League,
     LineupEntry,
     Matchup,
+    PendingClaim,
     Player,
     RosterMove,
     RosterSlot,
@@ -285,6 +286,9 @@ _VIEW_RESOURCES: Final[dict[str, Resource]] = {
     "mScoreboard": Resource.MATCHUPS,
     "mStandings": Resource.STANDINGS,
     "mTransactions2": Resource.TRANSACTIONS,
+    # The waiver queue (#109). Transactions' TTL; a successful write purges
+    # every league-tagged entry, so a claim or a cancel is never served stale.
+    "mPendingTransactions": Resource.TRANSACTIONS,
     "kona_league_communication": Resource.TRANSACTIONS,
     "kona_player_info": Resource.FREE_AGENTS,
     "mPositionalRatings": Resource.FREE_AGENTS,
@@ -1611,6 +1615,32 @@ class EspnProvider:
             {"type": "WAIVER", "executionType": "CANCEL", "relatedTransactionId": related},
         )
 
+    def fetch_pending_claims(
+        self, league_id: str, season: int, team_id: str | None = None
+    ) -> list[PendingClaim]:
+        """The queued waiver claims, from ``view=mPendingTransactions``.
+
+        The queue, not ``mTransactions2``: a cancelled claim leaves this view
+        at once, while its own ``mTransactions2`` row keeps reading
+        ``PENDING`` (``06-espn-add-drop-surface.md`` §2). This view also
+        carries ESPN's transaction id, which ``espn-api``'s ``transactions()``
+        drops, so a claim can be joined to the ``WriteResult`` that queued it
+        and to the cancel that withdraws it.
+
+        Only ``WAIVER`` rows with ``status: "PENDING"`` are returned; anything
+        else the view lists is left out rather than guessed at. ``team_id``
+        keeps one team's claims. A read, so not ownership-guarded: another
+        team's queue is visible to any member, as in the ESPN app.
+
+        :raises SchemaDriftError: when the body is not the captured shape -- not
+            an object, ``pendingTransactions`` not a list, or a pending claim
+            without an ``id``, a ``teamId``, or an ``items`` list.
+        """
+        with self._read(league_id, season, "fetch_pending_claims") as league:
+            payload = league.espn_request.league_get(params={"view": PENDING_VIEW})
+            wanted = None if team_id is None else str(team_id).strip()
+            return _pending_claims(payload, team_id=wanted)
+
     def credential_report(self) -> dict[str, Any]:
         """``{"espn_s2_age_seconds", "warning"}`` -- the R12a block every write
         result carries. Public so a ``--dry-run`` can show it without writing."""
@@ -2711,6 +2741,92 @@ def _write_result(payload: Any, *, write: _Write) -> WriteResult:
 # --------------------------------------------------------------------------- #
 # Normalization
 # --------------------------------------------------------------------------- #
+
+
+PENDING_VIEW: Final[str] = "mPendingTransactions"
+"""ESPN's waiver queue (brief 06 §2): the claims still to process, by id."""
+
+
+def _pending_drift(message: str, path: list[str]) -> SchemaDriftError:
+    return SchemaDriftError(
+        f"ESPN's {PENDING_VIEW} response {message}.",
+        path=[PENDING_VIEW, *path],
+        provider=PROVIDER,
+        remediation=(
+            "File an issue with this error payload; the waiver queue's shape changed. "
+            "Until it is fixed, read the queue with `fantasy-sports raw --view "
+            f"{PENDING_VIEW}`."
+        ),
+        details={"view": PENDING_VIEW},
+    )
+
+
+def _pending_claims(payload: Any, *, team_id: str | None) -> list[PendingClaim]:
+    """The ``WAIVER``/``PENDING`` rows of an ``mPendingTransactions`` body.
+
+    The captured body is an object whose ``pendingTransactions`` is a list of
+    transaction rows shaped like a claim's own write response. ESPN sends the
+    key for an empty queue too (an empty list; observed live in the test
+    league for #109), so an absent key is drift, not an empty queue: an agent
+    told "nothing is queued" by a body that no longer says so would resubmit
+    a claim it still has.
+    """
+    if not isinstance(payload, Mapping):
+        raise _pending_drift("is not a JSON object", [])
+    rows = payload.get("pendingTransactions")
+    if not isinstance(rows, list):
+        what = (
+            "has no pendingTransactions" if rows is None else "has a non-list pendingTransactions"
+        )
+        raise _pending_drift(what, ["pendingTransactions"])
+    found: list[PendingClaim] = []
+    for index, row in enumerate(rows):
+        where = f"pendingTransactions[{index}]"
+        if not isinstance(row, Mapping):
+            raise _pending_drift(f"has a {where} that is not an object", [where])
+        if row.get("type") != "WAIVER" or row.get("status") != "PENDING":
+            continue
+        claim_id = row.get("id")
+        team = row.get("teamId")
+        items = row.get("items")
+        for name, ok in (
+            ("id", isinstance(claim_id, str) and bool(claim_id)),
+            ("teamId", _as_int(team) is not None),
+            ("items", isinstance(items, list)),
+        ):
+            if not ok:
+                raise _pending_drift(f"has a pending claim without {name}", [f"{where}.{name}"])
+        if team_id is not None and str(_as_int(team)) != team_id:
+            continue
+        found.append(_pending_claim(row, claim_id, _as_int(team), items))
+    return found
+
+
+def _pending_claim(row: Mapping[str, Any], claim_id: Any, team: Any, items: Any) -> PendingClaim:
+    def players(kind: str) -> tuple[str, ...]:
+        return tuple(
+            str(item["playerId"])
+            for item in items
+            if isinstance(item, Mapping) and item.get("type") == kind and "playerId" in item
+        )
+
+    def moment(name: str) -> datetime | None:
+        millis = _as_int(row.get(name))
+        return None if millis is None else from_epoch_millis(millis)
+
+    return PendingClaim(
+        provider=PROVIDER,
+        provider_id=str(claim_id),
+        team_id=str(team),
+        players_in=players("ADD"),
+        players_out=players("DROP"),
+        bid_amount=_as_int(row.get("bidAmount")),
+        proposed_at=moment("proposedDate"),
+        processes_at=moment("processDate"),
+        status=str(row["status"]),
+        sub_order=_as_int(row.get("subOrder")),
+        raw=dict(row),
+    )
 
 
 def _teams_by_id(data: Mapping[str, Any]) -> dict[int, Mapping[str, Any]]:

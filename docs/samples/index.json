@@ -676,6 +676,32 @@
     "file": "add.json"
   },
   {
+    "name": "claims",
+    "command": "fantasy-sports claims --team 1",
+    "source": "replayed",
+    "league": "synthetic league 99, season 2026",
+    "exit": 0,
+    "stream": "stdout",
+    "format": "json",
+    "trimmed": true,
+    "note": "One claim queued by `claim` just before; the write host lists it the way brief 06 captured ESPN's queue",
+    "offline": true,
+    "file": "claims.json"
+  },
+  {
+    "name": "claim-cancel",
+    "command": "fantasy-sports cancel-claim --team 1 --id 5d0c6e2a-7f41-4b9e-a3c8-1e6f2b9d4a70",
+    "source": "replayed",
+    "league": "synthetic league 99, season 2026",
+    "exit": 0,
+    "stream": "stdout",
+    "format": "json",
+    "trimmed": false,
+    "note": "Withdraws the claim above; the write host answers the cancel shape brief 06 captured (a new id, CANCELED, relatedTransactionId)",
+    "offline": true,
+    "file": "claim-cancel.json"
+  },
+  {
     "name": "journal-digest",
     "command": "fantasy-sports journal digest --since 2026-09-12T00:00:00Z --irreversible",
     "source": "replayed",

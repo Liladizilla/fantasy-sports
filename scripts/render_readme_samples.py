@@ -843,6 +843,8 @@ WRITE_ENTRY_IDS = (
     "8b3c2d5e-4f6a-4b7c-9d8e-0f1a2b3c4d5e",
     "9c4d3e6f-5a7b-4c8d-ae9f-1a2b3c4d5e6f",
     "ad5e4f70-6b8c-4d9e-bfa0-2b3c4d5e6f70",
+    "be6f5081-7c9d-4eaf-80b1-3c4d5e6f7081",
+    "cf706192-8dae-4fb0-91c2-4d5e6f708192",
 )
 """Journal entry ids the write samples mint, in order, so they are byte-stable."""
 
@@ -963,6 +965,49 @@ def _move_samples(recorder: Recorder, replayed: Mapping[str, Any], serve: Any) -
         **replayed,
         note="The write host answers the community-attested FREEAGENT shape; no [notify] "
         "command is configured",
+    )
+    _claim_queue_samples(recorder, replayed, serve)
+
+
+def _claim_queue_samples(recorder: Recorder, replayed: Mapping[str, Any], serve: Any) -> None:
+    """``claims`` and ``cancel-claim`` (#109) against one queued claim.
+
+    The claim that fills the queue is run but not recorded: it is the setup,
+    and ``claim``'s own section shows its dry run. The write host queues it
+    where ``view=mPendingTransactions`` lists it, and answers the cancel the
+    way brief 06 captured (p5): a new id, ``CANCELED``, ``relatedTransactionId``.
+    """
+    from _harness import TRANSACTION_ID
+
+    serve("apply")
+    claim = [
+        "claim",
+        "--team",
+        "1",
+        "--player",
+        "Radia Perlman",
+        "--bid",
+        "7",
+        "--acknowledge-irreversible",
+        MOVE_JUSTIFICATION,
+    ]
+    with environment(replayed["env"]):
+        _, err, code = capture(claim)
+    if code != 0:
+        raise SystemExit(f"claim (setup for claims): exit {code}: {err}")
+    recorder.run(
+        "claims",
+        ["claims", "--team", "1"],
+        **replayed,
+        note="One claim queued by `claim` just before; the write host lists it the way "
+        "brief 06 captured ESPN's queue",
+    )
+    recorder.run(
+        "claim-cancel",
+        ["cancel-claim", "--team", "1", "--id", TRANSACTION_ID],
+        **replayed,
+        note="Withdraws the claim above; the write host answers the cancel shape brief 06 "
+        "captured (a new id, CANCELED, relatedTransactionId)",
     )
 
 

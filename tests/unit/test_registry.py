@@ -37,7 +37,9 @@ def clean_registry():
 V01_SURFACE = frozenset(
     {
         "add",
+        "cancel-claim",
         "claim",
+        "claims",
         "drop",
         "auth login",
         "auth logout",
@@ -74,7 +76,8 @@ def test_the_v01_surface_is_registered_and_nothing_else_is():
     (jwulff/fantasy-sports#16). `lineup set` and `journal reverse` are the
     first writes, from the write-surface plan (jwulff/fantasy-sports#105):
     the reversible half, ahead of `add`/`drop`/`claim`, which #18 added
-    behind an acknowledgement gate.
+    behind an acknowledgement gate. `claims` and `cancel-claim` (#109) are
+    the waiver queue: what is pending, and withdrawing one.
     """
     assert set(REGISTRY) == V01_SURFACE
 

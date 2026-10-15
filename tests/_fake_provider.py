@@ -106,9 +106,11 @@ class WritingFake(_Base):
         member_id: str | None = "{00000000-0000-0000-0000-000000000001}",
         result: Any = None,
         fail_with: BaseException | None = None,
+        pending_claims: Any = (),
         **options: Any,
     ) -> None:
         super().__init__(credentials, **options)
+        self.pending_claims = list(pending_claims)
         self.owned = tuple(owned)
         self.role = role
         self.member_id = member_id
@@ -168,6 +170,15 @@ class WritingFake(_Base):
             transaction_id=transaction_id,
             kind="CANCEL",
         )
+
+    def fetch_pending_claims(
+        self, league_id: str, season: int, team_id: str | None = None
+    ) -> list[Any]:
+        """``pending_claims`` as given, narrowed to ``team_id``. A read: no guard."""
+        self.calls.append(
+            ("fetch_pending_claims", {"league_id": league_id, "season": season, "team_id": team_id})
+        )
+        return [c for c in self.pending_claims if team_id is None or c.team_id == str(team_id)]
 
     def _write(
         self, method: str, league_id: str, season: int, team_id: str, *, kind: str, **args: Any

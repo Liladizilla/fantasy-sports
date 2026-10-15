@@ -194,6 +194,11 @@ ADD_DROP_CAPTURES = WRITE_CAPTURES.parent / "06-espn-add-drop-surface"
 TRANSACTION_ID = "5d0c6e2a-7f41-4b9e-a3c8-1e6f2b9d4a70"
 PROPOSED_DATE_MS = 1789041601000  # 2026-09-10T12:00:01Z, a second after UNLOCKED_AT
 
+#: The id ESPN gives a ``CANCEL``: a new transaction, not the claim's (brief 06 §2).
+CANCEL_TRANSACTION_ID = "c4a7e1d2-9b3f-4e6a-8d1c-5f2e7a9b0c13"
+#: When the synthetic league's waivers process a queued claim (``processDate``).
+PROCESS_DATE_MS = 1789290000000  # 2026-09-13T09:00:00Z
+
 
 def writable_nav(swid: str = FAKE_SWID) -> dict[str, Any]:
     """An ``mNav`` in which ``swid`` founded the league and owns team 1.
@@ -236,8 +241,19 @@ class WritableEspn(RecordedEspn):
     06's captures in shape: a claim is ``PENDING`` with ``bidAmount`` echoed
     (``0`` when none was sent). ``posts`` records every request body sent. ``echo_member`` replaces
     the ``memberId`` ESPN echoes, to play a write applied as another account.
-    ``show_pending`` off hides queued claims from ``mTransactions2``, as an
-    ESPN that did not list them would.
+
+    **The waiver queue (#109).** ``pending`` holds the queued claims, shaped
+    like the ``mPendingTransactions`` rows brief 06 captured, and
+    ``view=mPendingTransactions`` serves them as ``{"pendingTransactions":
+    [...]}``. ``mTransactions2`` lists them too, in the narrower shape it
+    carries. The first claim gets :data:`TRANSACTION_ID`, later ones a
+    numbered variant. A ``CANCEL`` is answered as p5 was: a new id
+    (:data:`CANCEL_TRANSACTION_ID`), ``CANCELED``, the claim's items echoed,
+    and ``relatedTransactionId``; the claim leaves the queue, while
+    ``mTransactions2`` keeps its ``PENDING`` row and gains the ``CANCELED``
+    one, as ESPN did. ``show_pending`` off hides queued claims from both
+    views, as an ESPN that did not list them would; ``pending_view`` off
+    empties only the queue, to play the queue lagging the transaction log.
     """
 
     #: The free-agent pool the move tests resolve against: one free agent per
@@ -259,6 +275,7 @@ class WritableEspn(RecordedEspn):
         reject_type: str | None = None,
         reject_capture: str | None = None,
         show_pending: bool = True,
+        pending_view: bool = True,
     ) -> None:
         super().__init__()
         self.mode = mode
@@ -266,8 +283,12 @@ class WritableEspn(RecordedEspn):
         self.reject_type = reject_type
         self.reject_capture = reject_capture
         self.show_pending = show_pending
+        self.pending_view = pending_view
         self.posts: list[dict[str, Any]] = []
         self.pending: list[dict[str, Any]] = []
+        self.withdrawn: list[dict[str, Any]] = []
+        """Rows ``mTransactions2`` keeps after a cancel: the claim, still
+        ``PENDING``, and the ``CANCELED`` row naming it."""
         self._bootstrap_key = next(
             key
             for key in self.bodies
@@ -312,8 +333,12 @@ class WritableEspn(RecordedEspn):
         # bootstrap carries the same `teams[].roster` shape.
         self.overrides["mRoster"] = bootstrap
         self.overrides["kona_player_info"] = {"players": self.pool}
-        if self.show_pending and self.pending:
-            self.overrides["mTransactions2"] = {"transactions": list(self.pending)}
+        queue = self.pending if self.show_pending and self.pending_view else []
+        self.overrides["mPendingTransactions"] = {"pendingTransactions": list(queue)}
+        logged = [_logged(row) for row in self.pending] if self.show_pending else []
+        logged += [_logged(row) for row in self.withdrawn]
+        if logged:
+            self.overrides["mTransactions2"] = {"transactions": logged}
         else:
             self.overrides.pop("mTransactions2", None)
 
@@ -344,32 +369,51 @@ class WritableEspn(RecordedEspn):
         kind = body.get("type", "ROSTER")
         execution = body.get("executionType", "EXECUTE")
         status, pending = "EXECUTED", False
+        transaction_id = TRANSACTION_ID
+        items = [self._echo(item) for item in body.get("items", [])]
+        answer: dict[str, Any] = {}
         if kind == "WAIVER" and execution == "EXECUTE":
             status, pending = "PENDING", True
+            transaction_id = self._claim_id()
         if execution == "CANCEL":
-            status = "CANCELED"
-        if self.mode == "apply":
-            self._apply(body, kind, execution)
-        return FakeResponse(
+            status, transaction_id = "CANCELED", CANCEL_TRANSACTION_ID
+            related = body.get("relatedTransactionId")
+            claim = next((t for t in self.pending if t.get("id") == related), None)
+            items = [self._echo(item) for item in (claim or {}).get("items", [])]
+            answer["relatedTransactionId"] = related
+        answer.update(
             {
                 "bidAmount": body.get("bidAmount", 0),
                 "executionType": execution,
-                "id": TRANSACTION_ID,
+                "id": transaction_id,
                 "isActingAsTeamOwner": False,
                 "isLeagueManager": False,
                 "isPending": pending,
-                "items": [self._echo(item) for item in body.get("items", [])],
+                "items": items,
                 "memberId": self.echo_member or self.overrides["mNav"]["members"][0]["id"],
                 "proposedDate": PROPOSED_DATE_MS,
                 "rating": 0,
                 "scoringPeriodId": body.get("scoringPeriodId"),
                 "skipTransactionCounters": False,
                 "status": status,
-                "subOrder": 0,
+                "subOrder": 0 if execution == "CANCEL" else 1 if pending else 0,
                 "teamId": body.get("teamId"),
                 "type": kind,
             }
         )
+        if self.mode == "apply":
+            self._apply(body, kind, execution, answer)
+        return FakeResponse(answer)
+
+    def _claim_id(self) -> str:
+        """:data:`TRANSACTION_ID` for the first claim, then numbered variants."""
+        taken = {t.get("id") for t in [*self.pending, *self.withdrawn]}
+        if TRANSACTION_ID not in taken:
+            return TRANSACTION_ID
+        n = 1
+        while f"{TRANSACTION_ID[:-2]}{n:02d}" in taken:
+            n += 1
+        return f"{TRANSACTION_ID[:-2]}{n:02d}"
 
     @staticmethod
     def _echo(item: Mapping[str, Any]) -> dict[str, Any]:
@@ -384,27 +428,42 @@ class WritableEspn(RecordedEspn):
             "type": item.get("type", "LINEUP"),
         }
 
-    def _apply(self, body: Mapping[str, Any], kind: str, execution: str) -> None:
+    def _apply(
+        self,
+        body: Mapping[str, Any],
+        kind: str,
+        execution: str,
+        answer: Mapping[str, Any] | None = None,
+    ) -> None:
         if execution == "CANCEL":
             related = body.get("relatedTransactionId")
+            claims = [t for t in self.pending if t.get("id") == related]
             self.pending = [t for t in self.pending if t.get("id") != related]
+            if answer is not None:
+                self.withdrawn += [*claims, dict(answer)]
             self._publish(self.bootstrap)
             return
         if kind == "WAIVER":
+            echoed = (answer or {}).get("items") or [
+                self._echo(item) for item in body.get("items", [])
+            ]
             self.pending.append(
                 {
-                    "id": TRANSACTION_ID,
+                    "bidAmount": body.get("bidAmount", 0),
+                    "executionType": "EXECUTE",
+                    "id": (answer or {}).get("id", TRANSACTION_ID),
+                    "isActingAsTeamOwner": False,
+                    "isLeagueManager": False,
+                    "isPending": True,
+                    "items": [dict(item, acquisitionBudget=0) for item in echoed],
+                    "memberId": (answer or {}).get("memberId"),
+                    "processDate": PROCESS_DATE_MS,
+                    "proposedDate": PROPOSED_DATE_MS,
+                    "rating": 0,
+                    "scoringPeriodId": body.get("scoringPeriodId"),
+                    "status": "PENDING",
                     "teamId": body.get("teamId"),
                     "type": "WAIVER",
-                    "status": "PENDING",
-                    "isPending": True,
-                    "scoringPeriodId": body.get("scoringPeriodId"),
-                    "proposedDate": PROPOSED_DATE_MS,
-                    "bidAmount": body.get("bidAmount", 0),
-                    "items": [
-                        {"playerId": i["playerId"], "type": i.get("type")}
-                        for i in body.get("items", [])
-                    ],
                 }
             )
             self._publish(self.bootstrap)
@@ -429,6 +488,29 @@ class WritableEspn(RecordedEspn):
                     "toLineupSlotId"
                 ]
         self._publish(updated)
+
+
+def _logged(row: Mapping[str, Any]) -> dict[str, Any]:
+    """A queued or withdrawn row in the narrower shape ``mTransactions2`` carries."""
+    logged = {
+        key: row[key]
+        for key in (
+            "id",
+            "teamId",
+            "type",
+            "status",
+            "isPending",
+            "scoringPeriodId",
+            "proposedDate",
+            "bidAmount",
+            "relatedTransactionId",
+        )
+        if key in row
+    }
+    logged["items"] = [
+        {"playerId": item["playerId"], "type": item.get("type")} for item in row.get("items", [])
+    ]
+    return logged
 
 
 def _roster_entry(pooled: Mapping[str, Any], team_id: int, slot: int) -> dict[str, Any]:

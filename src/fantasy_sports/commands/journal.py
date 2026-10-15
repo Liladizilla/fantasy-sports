@@ -117,8 +117,9 @@ _IRREVERSIBLE_REMEDIATION: dict[str, str] = {
     "in the ESPN app (or with `drop` once it ships); they may then sit on waivers.",
     "drop": "A drop cannot be undone by the tool. The player is on waivers or a free agent; "
     "re-acquiring them is a new add or claim, decided by a human.",
-    "claim": "A claim cannot be undone by the tool. If it is still pending, cancel it in the "
-    "ESPN app; if it processed, dropping the player is a new, irreversible decision.",
+    "claim": "A claim cannot be undone by the tool. If it is still pending, withdraw it with "
+    "`fantasy-sports cancel-claim --team ... --id <provider_transaction_id>`; if it "
+    "processed, dropping the player is a new, irreversible decision.",
     "cancel": "A cancelled claim cannot be restored. Resubmitting it is a new claim, decided "
     "by a human.",
 }

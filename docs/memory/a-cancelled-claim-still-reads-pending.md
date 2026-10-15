@@ -21,6 +21,12 @@ that, or fold `mTransactions2` by `relatedTransactionId` before trusting a
 `PENDING` status. A processed claim was not observed, so how its row reads
 afterwards is unknown.
 
+The view answers with the league envelope plus `pendingTransactions`, and
+sends that key as `[]` when nothing is queued (seen live, #109). So a body
+without the key is drift, not an empty queue: `_pending_claims` raises
+rather than tell an agent nothing is queued. The queue row carries
+`processDate`, when waivers will run it, but not `subOrder`.
+
 **The second, smaller trap: a just-drafted league has no free agents.** Every
 unrostered player is `WAIVERS` until the first waiver run after the draft, so a
 `FREEAGENT` add is `TRAN_PLAYER_NOT_FREEAGENT` whatever its shape. A probe or

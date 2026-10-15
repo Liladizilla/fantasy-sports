@@ -683,7 +683,9 @@ Commands:
   add           Add a free agent to your own team, optionally dropping a player. Irreversible.
   auth          3 subcommands: login, logout, status
   box-scores    List both lineups for a week's matchups, player by player, with projections.
+  cancel-claim  Withdraw one of your own pending waiver claims by its transaction id. Writes.
   claim         Submit a waiver claim, with a bid where the league uses FAAB; can drop a player. Irreversible.
+  claims        List a team's pending waiver claims by transaction id, newest first.
   doctor        Run every health check: config, credentials, cache, journal, version, provider.
   drop          Release a player from your own team to waivers. Irreversible.
   free-agents   List unrostered players, optionally filtered to one position.
@@ -2910,18 +2912,17 @@ ESPN does not say, so an agent learns the rule without a failed attempt.
 
 The flow is `add`'s, with two differences. ESPN answers a claim
 `is_pending: true`: nothing changes on the roster until waivers process, and
-`provider_transaction_id` is the id `claim cancel` will take (#109). The
-read-back therefore looks in this period's `transactions` for a pending
-waiver claim by your team that matches everything you submitted: the player,
-the `--drop`, and the bid, which ESPN records as `0` when none was sent.
-Exactly one match is `verified: true` with `matched_by`. Several identical
-pending claims are `verified: null`, because this one cannot be told apart
-from an earlier one. No match is `verified: null` with a `note`, never
-`true`: `transactions` does not carry ESPN's transaction ids, so a claim it
-does not list is unverified, not missing. A match proves the claim was
-queued and nothing later: a cancel is a new transaction, and the claim's own
-row keeps reading `PENDING` after it. A timed-out claim is never re-sent,
-because a second claim is a second bid.
+`provider_transaction_id` is the id [`claims`](#claims) lists and
+[`cancel-claim`](#cancel-claim) takes. The read-back therefore looks for that
+id in your team's waiver queue (`view=mPendingTransactions`). Listed is
+`verified: true` with `matched_by: ["provider_transaction_id"]`, an exact
+join that an earlier identical claim cannot satisfy. Not listed, whether
+the queue is empty or holds other claims, is `verified: null` with a `note`,
+never `true`. `read_back.queue_size` says how many claims the team has
+queued. `transactions` is never consulted: a cancelled claim's own row there
+keeps reading `PENDING`, so an earlier identical claim, since cancelled,
+would pass for this one. A timed-out claim is never re-sent, because a
+second claim is a second bid.
 
 `cost.bid_amount` is the bid, `null` without one; `cost.displaced_player_id`
 is `--drop`.
@@ -3028,6 +3029,244 @@ fantasy-sports claim --team 1 --player 'Radia Perlman' --bid 7 --dry-run
     "acquisition_type": null,
     "uses_budget": true,
     "note": "Dry run: nothing was sent and nothing was journaled. The items were computed from the roster and free-agent pool just read; ESPN has no validate-only mode, so whether it would accept them (roster size, position limits, budget, waiver order) was not checked. A real run needs --acknowledge-irreversible."
+  },
+  "error": null
+}
+```
+<!-- /sample -->
+
+### `claims`
+
+Lists one team's pending waiver claims, newest first, from ESPN's waiver
+queue (`view=mPendingTransactions`). `data` is a list. Each claim carries
+`provider_id`, ESPN's transaction id and the `--id` that `cancel-claim`
+takes, plus `team_id`, `players_in` (the player it would add),
+`players_out` (the player it would drop), `bid_amount`, `proposed_at`,
+`processes_at` (when ESPN says waivers will run it), `status`, `sub_order`,
+and `raw`. Times are UTC. ESPN records a bidless claim's `bid_amount` as `0`.
+`sub_order` is `null` when ESPN's queue omits it, which it did when
+captured.
+
+This is the queue, not the transaction log. A cancelled claim leaves the
+queue at once, while its own row in `transactions` keeps reading `PENDING`
+(`docs/memory/a-cancelled-claim-still-reads-pending.md`). To ask whether a
+claim is still live, ask `claims`.
+
+`--team` defaults to the team the session owns. With no SWID, or a session
+that owns more than one team, it is required, and leaving it out is
+`CONFIG_INVALID`. Another team's queue is readable too, as it is in the
+ESPN app. The read caches for 15 minutes like `transactions`, and every
+successful write purges it. Pass `--fresh` before acting on what it shows.
+
+| Option | |
+|---|---|
+| `--team` | The team whose queue to read, by id or name. Defaults to your own team |
+
+<!-- sample: claims -->
+```bash
+fantasy-sports claims --team 1
+# synthetic league 99, season 2026 (replayed). Exit 0, stdout, trimmed with …. One claim queued by `claim` just before; the write host lists it the way brief 06 captured ESPN's queue:
+```
+```json
+{
+  "schema": "fantasy-sports/v1",
+  "provider": "espn",
+  "league_id": "99",
+  "season": 2026,
+  "generated_at": "2026-10-15T07:34:31Z",
+  "data_as_of": "2026-10-15T07:34:31Z",
+  "data_age_seconds": 0,
+  "sources": [
+    {
+      "name": "mTeam+mRoster+mMatchup+mSettings+mStandings",
+      "fetched_at": "2026-10-15T07:34:31Z",
+      "age_seconds": 0,
+      "cached": true
+    },
+    {
+      "name": "players_wl",
+      "fetched_at": "2026-10-15T07:34:31Z",
+      "age_seconds": 0,
+      "cached": true
+    },
+    {
+      "name": "proTeamSchedules_wl",
+      "fetched_at": "2026-10-15T07:34:31Z",
+      "age_seconds": 0,
+      "cached": true
+    },
+    {
+      "name": "mDraftDetail",
+      "fetched_at": "2026-10-15T07:34:31Z",
+      "age_seconds": 0,
+      "cached": true
+    },
+    {
+      "name": "mPendingTransactions",
+      "fetched_at": "2026-10-15T07:34:31Z",
+      "age_seconds": 0,
+      "cached": true
+    }
+  ],
+  "untrusted": {},
+  "raw_omitted": false,
+  "data": [
+    {
+      "provider": "espn",
+      "provider_id": "5d0c6e2a-7f41-4b9e-a3c8-1e6f2b9d4a70",
+      "team_id": "1",
+      "players_in": [
+        "3002"
+      ],
+      "players_out": [],
+      "bid_amount": 7,
+      "proposed_at": "2026-09-10T12:00:01Z",
+      "processes_at": "2026-09-13T09:00:00Z",
+      "status": "PENDING",
+      "sub_order": null,
+      "raw": {
+        "bidAmount": 7,
+        "executionType": "EXECUTE",
+        "id": "5d0c6e2a-7f41-4b9e-a3c8-1e6f2b9d4a70",
+        "isActingAsTeamOwner": false,
+        "…": "… 11 more keys"
+      }
+    }
+  ],
+  "error": null
+}
+```
+<!-- /sample -->
+
+### `cancel-claim`
+
+Withdraws one of your own pending waiver claims before it processes. It sends
+a `WAIVER` transaction with `executionType: "CANCEL"` and
+`relatedTransactionId` naming the claim, the shape brief 06 captured. It is
+not `claim cancel`: a `claim` command group would shadow the `claim` command
+itself.
+
+**What is checked before anything is sent.** `--team` must be a team the
+session owns, or it is `WRITE_REJECTED` `not_owned`. `--id` must then be in
+that team's queue as just read. An id that is not there is `CONFIG_INVALID`
+(`kind: "argument"`) with `details.pending_ids` and a pointer to `claims`.
+That covers another team's claim, a claim that already processed, a claim
+already cancelled, and a typo. Nothing is sent or journaled.
+
+**No `--acknowledge-irreversible`.** A cancel withdraws a claim. It spends no
+FAAB and no waiver priority, and it changes no roster. The flag exists to make
+a caller say why it is giving something up, and a cancel gives up nothing that
+a new claim cannot restore. It is still `reversible: false`, because the tool
+cannot un-cancel: resubmitting is a new claim, behind its own flag. For the
+same reason the owner's [notify hook](../README.md#being-told-about-irreversible-writes)
+is not run, and `notified` is `null`.
+
+**Two ids.** ESPN answers a cancel with a **new** transaction id, reported as
+`provider_transaction_id` and journaled as the entry's. The claim it withdrew
+is `cancelled_claim_id`, which the entry keeps under
+`applied_state.cancelled_claim_id`, next to ESPN's own
+`related_transaction_id`. `items` are the withdrawn claim's players, in the
+vocabulary `claim` reports. The journal entry is kind `cancel`, with the claim
+as `prior_state`.
+
+**Read-back.** The queue is re-read, and the claim must be gone from it:
+`read_back.verified` is `true`. ESPN still listing it is `verified: false`
+with the id in `diverged`, and a queue that cannot be read is `verified:
+false` with `error`. Either way the cancel was accepted, the entry closes
+`executed`, and a warning says to run `claims` before acting again. A
+timed-out cancel stays `pending` in the journal and is never re-sent.
+
+| Option | |
+|---|---|
+| `--team` | Your team's id or name. Required |
+| `--id` | The claim's transaction id, from `claims` or from `claim`. Required |
+| `--dry-run` | Check the claim is queued and report what would be sent; send and journal nothing |
+
+<!-- sample: claim-cancel -->
+```bash
+fantasy-sports cancel-claim --team 1 --id 5d0c6e2a-7f41-4b9e-a3c8-1e6f2b9d4a70
+# synthetic league 99, season 2026 (replayed). Exit 0, stdout. Withdraws the claim above; the write host answers the cancel shape brief 06 captured (a new id, CANCELED, relatedTransactionId):
+```
+```json
+{
+  "schema": "fantasy-sports/v1",
+  "provider": "espn",
+  "league_id": "99",
+  "season": 2026,
+  "generated_at": "2026-10-15T07:34:31Z",
+  "data_as_of": "2026-09-10T12:00:00Z",
+  "data_age_seconds": 3008071,
+  "sources": [
+    {
+      "name": "mTeam+mRoster+mMatchup+mSettings+mStandings",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3008071,
+      "cached": false
+    },
+    {
+      "name": "players_wl",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3008071,
+      "cached": false
+    },
+    {
+      "name": "proTeamSchedules_wl",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3008071,
+      "cached": false
+    },
+    {
+      "name": "mDraftDetail",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3008071,
+      "cached": false
+    },
+    {
+      "name": "mPendingTransactions",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3008071,
+      "cached": false
+    }
+  ],
+  "untrusted": {},
+  "raw_omitted": false,
+  "data": {
+    "team_id": "1",
+    "kind": "cancel",
+    "provider_transaction_id": "c4a7e1d2-9b3f-4e6a-8d1c-5f2e7a9b0c13",
+    "cancelled_claim_id": "5d0c6e2a-7f41-4b9e-a3c8-1e6f2b9d4a70",
+    "status": "CANCELED",
+    "is_pending": false,
+    "proposed_at": "2026-09-10T12:00:01Z",
+    "items": [
+      {
+        "player_id": "3002",
+        "type": "add",
+        "from_slot": null,
+        "to_slot": null
+      }
+    ],
+    "journal_entry_id": "cf706192-8dae-4fb0-91c2-4d5e6f708192",
+    "reversible": false,
+    "acknowledged_irreversible": null,
+    "cost": {
+      "bid_amount": null,
+      "displaced_player_id": null
+    },
+    "credentials": {
+      "espn_s2_age_seconds": null,
+      "warning": "credential age unknown"
+    },
+    "read_back": {
+      "verified": true,
+      "diverged": [],
+      "matched_by": [
+        "provider_transaction_id"
+      ],
+      "queue_size": 0
+    },
+    "notified": null,
+    "dry_run": false
   },
   "error": null
 }

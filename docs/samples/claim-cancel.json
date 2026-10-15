@@ -1,0 +1,82 @@
+{
+  "schema": "fantasy-sports/v1",
+  "provider": "espn",
+  "league_id": "99",
+  "season": 2026,
+  "generated_at": "2026-10-15T07:34:31Z",
+  "data_as_of": "2026-09-10T12:00:00Z",
+  "data_age_seconds": 3008071,
+  "sources": [
+    {
+      "name": "mTeam+mRoster+mMatchup+mSettings+mStandings",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3008071,
+      "cached": false
+    },
+    {
+      "name": "players_wl",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3008071,
+      "cached": false
+    },
+    {
+      "name": "proTeamSchedules_wl",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3008071,
+      "cached": false
+    },
+    {
+      "name": "mDraftDetail",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3008071,
+      "cached": false
+    },
+    {
+      "name": "mPendingTransactions",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3008071,
+      "cached": false
+    }
+  ],
+  "untrusted": {},
+  "raw_omitted": false,
+  "data": {
+    "team_id": "1",
+    "kind": "cancel",
+    "provider_transaction_id": "c4a7e1d2-9b3f-4e6a-8d1c-5f2e7a9b0c13",
+    "cancelled_claim_id": "5d0c6e2a-7f41-4b9e-a3c8-1e6f2b9d4a70",
+    "status": "CANCELED",
+    "is_pending": false,
+    "proposed_at": "2026-09-10T12:00:01Z",
+    "items": [
+      {
+        "player_id": "3002",
+        "type": "add",
+        "from_slot": null,
+        "to_slot": null
+      }
+    ],
+    "journal_entry_id": "cf706192-8dae-4fb0-91c2-4d5e6f708192",
+    "reversible": false,
+    "acknowledged_irreversible": null,
+    "cost": {
+      "bid_amount": null,
+      "displaced_player_id": null
+    },
+    "credentials": {
+      "espn_s2_age_seconds": null,
+      "warning": "credential age unknown"
+    },
+    "read_back": {
+      "verified": true,
+      "diverged": [],
+      "matched_by": [
+        "provider_transaction_id"
+      ],
+      "queue_size": 0
+    },
+    "notified": null,
+    "dry_run": false
+  },
+  "error": null
+}

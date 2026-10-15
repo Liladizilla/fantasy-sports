@@ -33,9 +33,9 @@ What an agent can rely on
   (a timeout) leaves it ``pending`` and is never retried.
 * **Read back.** An executed add or drop re-reads the roster: the added player
   must be on it and the dropped one gone, or it is ``WRITE_DIVERGED``. A claim
-  is pending until waivers process, so its read-back looks for the queued row
-  in ``transactions`` and reports ``verified: null`` when it cannot see one --
-  never a verification it did not make.
+  is pending until waivers process, so its read-back looks for the claim's id
+  in ESPN's waiver queue (``claims``, #109), and reports ``verified: null``
+  when it cannot see the claim -- never a verification it did not make.
 * **The owner is told.** After the entry closes, :func:`notify_irreversible`
   runs with the stored entry (R7a, #113). Its result is ``data.notified``; it
   never fails the write.
@@ -81,11 +81,9 @@ DRY_RUN_NOTE = (
     f"checked. A real run needs {ACKNOWLEDGE_FLAG}."
 )
 
-PENDING_NOTE = (
-    "ESPN queued the claim; it processes when waivers clear, and the roster does not "
-    "change until then. No pending row for it was visible in `transactions`, which does "
-    "not expose ESPN's transaction ids, so the claim is unverified rather than missing. "
-    "`claims` (jwulff/fantasy-sports#109) lists pending claims by id."
+NOT_IN_QUEUE_NOTE = (
+    "{claim_id} was accepted as PENDING but is not in the waiver queue yet; run "
+    "`fantasy-sports claims --team {team_id}` to confirm."
 )
 
 _POOL_FREE_AGENT = "FREEAGENT"
@@ -651,7 +649,7 @@ def execute_move(
         echoed = [dict(item) for item in result.items]
 
         if result.is_pending:
-            read_back = _pending_read_back(ctx, team_id, plan, scoring_period)
+            read_back = _claim_read_back(ctx, team_id, result.provider_transaction_id)
             applied: dict[str, Any] = {"items": echoed, "is_pending": True}
         else:
             read_back, observed, expected = _roster_read_back(ctx, team_id, plan)
@@ -737,59 +735,35 @@ def _roster_read_back(
     return {"verified": not diverged, "diverged": diverged}, observed, expected
 
 
-def _pending_read_back(
-    ctx: ReadContext, team_id: str, plan: MovePlan, scoring_period: int | None
-) -> dict[str, Any]:
-    """Look for the queued claim in this period's ``transactions``.
+def _claim_read_back(ctx: ReadContext, team_id: str, transaction_id: str) -> dict[str, Any]:
+    """Look for the queued claim by the id ESPN answered with (#109).
 
-    The normalized transaction carries no ESPN transaction id (``espn-api``
-    drops it), so the match is on everything this claim submitted: a pending
-    waiver claim by this team, for exactly the claimed player, displacing
-    exactly the ``--drop`` player, at exactly this bid (ESPN records a
-    bidless claim as ``0``). Exactly one such row is ``verified: true``.
+    The waiver queue (``view=mPendingTransactions``) carries ESPN's
+    transaction ids, so a listed id is ``verified: true`` with ``matched_by:
+    ["provider_transaction_id"]`` -- an exact join, which an earlier identical
+    claim cannot satisfy. Not listed -- the queue empty, or holding other
+    claims -- is ``verified: null`` with a note, never ``true``: right after a
+    ``PENDING`` answer that is lag, not doubt about the queue. A queue that
+    cannot be read is ``verified: false`` with the error code.
 
-    None is ``verified: null`` with a note: a pending row ESPN does not show
-    and a claim that is missing look the same from here. More than one is
-    ``null`` too, because an earlier identical claim would satisfy the same
-    match and this one cannot be told apart from it. A match proves the claim
-    was queued, nothing later: a cancel is a new transaction, and the claim's
-    own ``mTransactions2`` row keeps reading ``PENDING`` after it.
+    There is deliberately no fallback to matching the claim's details in
+    ``transactions`` (#18's read-back). A cancelled claim's own
+    ``mTransactions2`` row reads ``PENDING`` forever, and ``espn-api`` drops
+    the ids that would let a ``CANCELED`` row's ``relatedTransactionId`` fold
+    it out, so a stale identical claim would verify a new one ESPN had not
+    shown (Codex on #122).
     """
-    try:
-        rows = ctx.provider.fetch_transactions(*ctx.target, scoring_period=scoring_period)
-    except FantasySportsError as exc:
-        return {"verified": False, "diverged": [], "error": exc.code.value}
-    adds = {move.player_id for move in plan.adds}
-    drops = {move.player_id for move in plan.drops}
-    bid = plan.bid or 0
-    matches = 0
-    for row in rows:
-        raw = row.raw if isinstance(row.raw, Mapping) else {}
-        recorded_bid = raw.get("bidAmount")
-        if (
-            row.type == "waiver_claim"
-            and str(row.team_provider_id) == str(team_id)
-            and set(row.players_in) == adds
-            and set(row.players_out) == drops
-            and (recorded_bid if isinstance(recorded_bid, int) else 0) == bid
-            and str(raw.get("status") or "").upper() == "PENDING"
-        ):
-            matches += 1
-    if matches == 1:
-        return {
-            "verified": True,
-            "diverged": [],
-            "matched_by": ["type", "team_id", "adds", "drops", "bid", "status"],
-        }
-    if matches > 1:
-        return {
-            "verified": None,
-            "diverged": [],
-            "note": f"{matches} identical pending claims are queued for this team, so this "
-            "one cannot be told apart from an earlier one. `claims` "
-            "(jwulff/fantasy-sports#109) lists them by id.",
-        }
-    return {"verified": None, "diverged": [], "note": PENDING_NOTE}
+    from fantasy_sports.commands.claims import pending_read_back
+
+    found = pending_read_back(ctx, team_id, transaction_id, gone=False)
+    if found["verified"] or found.get("error") is not None:
+        return found
+    return {
+        "verified": None,
+        "diverged": [],
+        "queue_size": found["queue_size"],
+        "note": NOT_IN_QUEUE_NOTE.format(claim_id=transaction_id, team_id=team_id),
+    }
 
 
 def _announce(journal: Any, entry_id: str) -> dict[str, Any]:

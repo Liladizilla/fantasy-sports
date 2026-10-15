@@ -1,0 +1,67 @@
+{
+  "schema": "fantasy-sports/v1",
+  "provider": "espn",
+  "league_id": "99",
+  "season": 2026,
+  "generated_at": "2026-10-15T07:34:31Z",
+  "data_as_of": "2026-10-15T07:34:31Z",
+  "data_age_seconds": 0,
+  "sources": [
+    {
+      "name": "mTeam+mRoster+mMatchup+mSettings+mStandings",
+      "fetched_at": "2026-10-15T07:34:31Z",
+      "age_seconds": 0,
+      "cached": true
+    },
+    {
+      "name": "players_wl",
+      "fetched_at": "2026-10-15T07:34:31Z",
+      "age_seconds": 0,
+      "cached": true
+    },
+    {
+      "name": "proTeamSchedules_wl",
+      "fetched_at": "2026-10-15T07:34:31Z",
+      "age_seconds": 0,
+      "cached": true
+    },
+    {
+      "name": "mDraftDetail",
+      "fetched_at": "2026-10-15T07:34:31Z",
+      "age_seconds": 0,
+      "cached": true
+    },
+    {
+      "name": "mPendingTransactions",
+      "fetched_at": "2026-10-15T07:34:31Z",
+      "age_seconds": 0,
+      "cached": true
+    }
+  ],
+  "untrusted": {},
+  "raw_omitted": false,
+  "data": [
+    {
+      "provider": "espn",
+      "provider_id": "5d0c6e2a-7f41-4b9e-a3c8-1e6f2b9d4a70",
+      "team_id": "1",
+      "players_in": [
+        "3002"
+      ],
+      "players_out": [],
+      "bid_amount": 7,
+      "proposed_at": "2026-09-10T12:00:01Z",
+      "processes_at": "2026-09-13T09:00:00Z",
+      "status": "PENDING",
+      "sub_order": null,
+      "raw": {
+        "bidAmount": 7,
+        "executionType": "EXECUTE",
+        "id": "5d0c6e2a-7f41-4b9e-a3c8-1e6f2b9d4a70",
+        "isActingAsTeamOwner": false,
+        "…": "… 11 more keys"
+      }
+    }
+  ],
+  "error": null
+}

@@ -10,6 +10,21 @@ football API, distributed via `uv tool install fantasy-sports`.
 
 ### Added
 
+- **`claims` and `cancel-claim`, the waiver queue** — `claims [--team T]`
+  lists a team's pending waiver claims, newest first, from ESPN's
+  `view=mPendingTransactions`, by transaction id (`provider_id`), with the
+  players in and out, the bid, `proposed_at`, and `processes_at`. `--team`
+  defaults to the session's own team. `cancel-claim --team T --id ID`
+  withdraws one: ownership is checked first, an id not in that team's queue is
+  `CONFIG_INVALID` and never sent, and no `--acknowledge-irreversible` is
+  needed because a cancel spends nothing. It is journaled as kind `cancel`
+  with the cancel's own new id as `provider_transaction_id` and the claim's
+  as `cancelled_claim_id`, read back against the queue, and not announced.
+  `claim`'s read-back now joins on the claim's id in the queue; the details
+  match against `transactions` is removed, because a cancelled claim's row
+  there reads `PENDING` forever and could verify a new identical claim.
+  New model `PendingClaim`; `WritingProvider` gains `fetch_pending_claims`
+  (#109).
 - **`add`, `drop`, and `claim`, the irreversible writes** — `add --team T
   --player P [--drop D] [--slot S]` sends a `FREEAGENT` transaction with one
   `ADD` (and a `DROP` with `--drop`),

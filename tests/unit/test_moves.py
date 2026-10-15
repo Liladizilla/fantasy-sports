@@ -32,6 +32,7 @@ from typing import Any
 
 import pytest
 from _harness import (
+    PROPOSED_DATE_MS,
     TRANSACTION_ID,
     WritableEspn,
     install_writable_espn,
@@ -39,7 +40,7 @@ from _harness import (
 )
 
 from fantasy_sports.commands import REGISTRY, DataShape
-from fantasy_sports.commands.moves import PENDING_NOTE
+from fantasy_sports.commands.moves import NOT_IN_QUEUE_NOTE
 from fantasy_sports.core.errors import (
     ConfigInvalidError,
     NotAvailableError,
@@ -362,7 +363,7 @@ def test_a_drop_sends_one_drop_item_and_the_player_lands_on_waivers(espn: Writab
     assert entry.kind == "drop" and entry.prior_state == {"roster": {"2002": "RB"}, "pool": {}}
 
 
-def test_a_claim_is_pending_carries_its_bid_and_is_seen_in_transactions(espn: WritableEspn):
+def test_a_claim_is_pending_carries_its_bid_and_is_found_in_the_queue_by_id(espn: WritableEspn):
     before = espn.slots()
     data = _claim(bid=7, acknowledge_irreversible=WHY)["data"]
     assert data["kind"] == "claim"
@@ -373,7 +374,8 @@ def test_a_claim_is_pending_carries_its_bid_and_is_seen_in_transactions(espn: Wr
     assert data["read_back"] == {
         "verified": True,
         "diverged": [],
-        "matched_by": ["type", "team_id", "adds", "drops", "bid", "status"],
+        "matched_by": ["provider_transaction_id"],
+        "queue_size": 1,
     }
     (body,) = espn.posts
     assert body["type"] == "WAIVER" and body["bidAmount"] == 7
@@ -484,9 +486,13 @@ def test_a_claim_espn_does_not_list_is_unverified_not_verified(monkeypatch: pyte
     install_writable_espn(monkeypatch, show_pending=False)
     data = _claim(acknowledge_irreversible=WHY)["data"]
     read_back = data["read_back"]
-    assert read_back["verified"] is None
-    assert read_back["diverged"] == []
-    assert "#109" in read_back["note"] and "unverified" in read_back["note"]
+    assert read_back == {
+        "verified": None,
+        "diverged": [],
+        "queue_size": 0,
+        "note": NOT_IN_QUEUE_NOTE.format(claim_id=TRANSACTION_ID, team_id="1"),
+    }
+    assert "`fantasy-sports claims --team 1`" in read_back["note"]
     assert "warnings" not in data
 
 
@@ -519,21 +525,69 @@ def test_an_older_pending_claim_does_not_verify_a_different_new_one(
 ):
     """ESPN answers PENDING but the new claim is not visible (``ignore``); an
     earlier claim for the same player with a different bid or drop must not
-    stand in for it (Codex on #122)."""
+    stand in for it (Codex on #122). The queue lists the older one by its own
+    id, so the new one is unverified with a note, not matched."""
     espn = install_writable_espn(monkeypatch, mode="ignore")
     espn.pending.append(older)
     espn._publish(espn.bootstrap)
     data = _claim(acknowledge_irreversible=WHY, **claim)["data"]
-    assert data["read_back"]["verified"] is None
-    assert data["read_back"]["note"] == PENDING_NOTE
+    assert data["read_back"] == {
+        "verified": None,
+        "diverged": [],
+        "queue_size": 1,
+        "note": NOT_IN_QUEUE_NOTE.format(claim_id=TRANSACTION_ID, team_id="1"),
+    }
 
 
-def test_an_identical_earlier_claim_makes_the_new_one_unverifiable(espn: WritableEspn):
+def test_an_identical_earlier_claim_no_longer_hides_the_new_one(espn: WritableEspn):
+    """#109: the queue carries ESPN's ids, so the join is exact. Under #18's
+    details match two identical claims were indistinguishable."""
     espn.pending.append(_queued(7))
     espn._publish(espn.bootstrap)
     data = _claim(bid=7, acknowledge_irreversible=WHY)["data"]
-    assert data["read_back"]["verified"] is None
-    assert "2 identical pending claims" in data["read_back"]["note"]
+    assert data["read_back"] == {
+        "verified": True,
+        "diverged": [],
+        "matched_by": ["provider_transaction_id"],
+        "queue_size": 2,
+    }
+
+
+def test_a_stale_cancelled_claim_in_transactions_never_verifies_a_new_one(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Codex on #122: a claim cancelled earlier keeps an identical ``PENDING``
+    row in ``mTransactions2`` forever. With the new claim not yet visible and
+    the queue empty, #18's details match took that ghost for the new claim
+    and reported ``verified: true``. The read-back reads the queue only."""
+    espn = install_writable_espn(monkeypatch, pending_view=False)
+    stale = _claim(bid=7, acknowledge_irreversible=WHY)["data"]["provider_transaction_id"]
+    espn.post(  # cancel it on the write host; `cancel-claim` would refuse a hidden id
+        "",
+        json={"type": "WAIVER", "executionType": "CANCEL", "relatedTransactionId": stale},
+    )
+    logged = espn.overrides["mTransactions2"]["transactions"]
+    assert sorted(row["status"] for row in logged) == ["CANCELED", "PENDING"]
+    assert espn.overrides["mPendingTransactions"] == {"pendingTransactions": []}
+
+    espn.mode = "ignore"  # ESPN answers PENDING; the new row is not visible yet
+    data = _claim(bid=7, acknowledge_irreversible=WHY)["data"]
+    assert data["read_back"] == {
+        "verified": None,
+        "diverged": [],
+        "queue_size": 0,
+        "note": NOT_IN_QUEUE_NOTE.format(claim_id=data["provider_transaction_id"], team_id="1"),
+    }
+
+
+def test_a_second_claim_gets_its_own_id(espn: WritableEspn):
+    first = _claim(bid=7, acknowledge_irreversible=WHY)["data"]
+    second = _claim(bid=7, drop="2003", acknowledge_irreversible=WHY)["data"]
+    assert first["provider_transaction_id"] == TRANSACTION_ID
+    assert second["provider_transaction_id"] != TRANSACTION_ID
+    assert second["read_back"]["verified"] is True
+    assert second["read_back"]["queue_size"] == 2
+    assert {row["proposedDate"] for row in espn.pending} == {PROPOSED_DATE_MS}
 
 
 def test_a_bidless_claim_matches_the_zero_espn_records(espn: WritableEspn):
@@ -816,9 +870,9 @@ def test_a_slot_that_reads_back_differently_diverges(
 ):
     original = espn._apply
 
-    def bench_instead(body: Any, kind: str, execution: str) -> None:
+    def bench_instead(body: Any, kind: str, execution: str, *rest: Any) -> None:
         items = [dict(item, toLineupSlotId=BENCH) for item in body["items"]]
-        original(dict(body, items=items), kind, execution)
+        original(dict(body, items=items), kind, execution, *rest)
 
     monkeypatch.setattr(espn, "_apply", bench_instead)
     with pytest.raises(WriteDivergedError) as caught:
@@ -899,13 +953,13 @@ def test_a_read_back_that_fails_is_an_unverified_success(
 ):
     from fantasy_sports.providers.espn import EspnProvider
 
-    method = "fetch_roster" if command == "drop" else "fetch_transactions"
+    method = "fetch_roster" if command == "drop" else "fetch_pending_claims"
     original = getattr(EspnProvider, method)
     calls: list[int] = []
 
     def flaky(self: EspnProvider, *args: Any, **kwargs: Any) -> Any:
         calls.append(1)
-        if method == "fetch_transactions" or len(calls) > 1:
+        if method == "fetch_pending_claims" or len(calls) > 1:
             raise ProviderUnavailableError("down")
         return original(self, *args, **kwargs)
 
@@ -1029,35 +1083,6 @@ def test_the_statement_for_each_kind():
     assert claim.startswith("A processed claim for B (2) consumes waiver priority")
     both = irreversible_because("add", "B (2)", "A (1)")
     assert both.startswith("B (2) joins the roster") and both.endswith("cannot be reversed.")
-
-
-def test_a_pending_row_that_is_not_pending_does_not_verify():
-    from types import SimpleNamespace
-
-    from fantasy_sports.commands.moves import MovePlan, _pending_read_back
-    from fantasy_sports.core.models import RosterMove
-
-    row = SimpleNamespace(
-        type="waiver_claim",
-        team_provider_id="1",
-        players_in=("3002",),
-        players_out=(),
-        raw={"status": "EXECUTED", "bidAmount": 1},
-    )
-    ctx = SimpleNamespace(
-        provider=SimpleNamespace(fetch_transactions=lambda *a, **k: [row]), target=("99", 2026)
-    )
-    plan = MovePlan(
-        kind="claim",
-        adds=(RosterMove("3002"),),
-        drops=(),
-        bid=1,
-        items=(),
-        prior_state={},
-        cost={},
-        irreversible_because="",
-    )
-    assert _pending_read_back(ctx, "1", plan, 2)["verified"] is None  # type: ignore[arg-type]
 
 
 def test_a_pool_entry_without_a_status_is_not_refused_on_its_account():

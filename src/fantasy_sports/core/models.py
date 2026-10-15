@@ -56,6 +56,7 @@ __all__ = [
     "BoxScore",
     "LineupEntry",
     "Matchup",
+    "PendingClaim",
     "Player",
     "ProviderObject",
     "RosterMove",
@@ -627,6 +628,49 @@ class WriteResult(ProviderObject):
     """The member the provider attributed the write to, as it echoed it --
     the pseudonym, never the SWID. The journal attributes to this, not to an
     id we sent (we send none)."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class PendingClaim(ProviderObject):
+    """A waiver claim the provider has queued and not yet processed.
+
+    Read from the provider's own queue (ESPN's ``view=mPendingTransactions``),
+    which carries the transaction id that ``cancel-claim`` takes and which a
+    claim leaves the moment it is withdrawn. Not :class:`Transaction`: that
+    model narrows to completed moves, and ESPN's transaction log keeps a
+    cancelled claim's own row reading ``PENDING``
+    (``docs/memory/a-cancelled-claim-still-reads-pending.md``).
+
+    Not in :data:`NORMALIZED_MODELS`, like :class:`SessionRole`: it is served
+    by the writing protocol, because the only reason to list the queue by id is
+    to act on it.
+    """
+
+    _SEQUENCES: ClassVar[frozenset[str]] = frozenset({"players_in", "players_out"})
+
+    provider: str
+    provider_id: str
+    """The provider's transaction id: what ``cancel-claim --id`` takes, and the
+    ``provider_transaction_id`` the ``claim`` that queued it returned."""
+    team_id: str
+    """The team that submitted the claim."""
+    players_in: tuple[str, ...] = ()
+    """Player ids the claim would add."""
+    players_out: tuple[str, ...] = ()
+    """Player ids the claim would drop if it processes."""
+    bid_amount: int | None = None
+    """The FAAB bid as the provider recorded it. ESPN records a bidless claim
+    as ``0``."""
+    proposed_at: datetime | None = None
+    """When the claim was submitted, UTC."""
+    processes_at: datetime | None = None
+    """When the provider says waivers will process it, UTC, where it says."""
+    status: str
+    """The provider's own status, verbatim (``"PENDING"``)."""
+    sub_order: int | None = None
+    """The provider's ordering among one team's claims, where it reports one.
+    ESPN's queue view has been seen without it."""
+    raw: Mapping[str, Any]
 
 
 #: Every normalized provider object. ``CredentialSpec`` is deliberately absent:

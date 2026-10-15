@@ -544,11 +544,42 @@ fantasy-sports add --team "My Team" --player "Player C" --drop "Player A" --ackn
   notification never fails the write; treat `ok: false` as a reason to tell
   the owner some other way.
 - **A claim is pending, not done.** It returns `is_pending: true` and the
-  transaction id. `read_back.verified` is `null` when the pending row cannot
-  be seen, which means unverified, not missing.
+  transaction id, and the read-back finds that id in ESPN's waiver queue.
+  `read_back.verified` is `null` when the claim cannot be seen, which means
+  unverified, not missing.
 - **Never retry an unknown outcome.** A timeout is `PROVIDER_UNAVAILABLE`
-  with `transaction_state: "unknown"`. Read `transactions` before anything
-  else, because a second claim is a second bid.
+  with `transaction_state: "unknown"`. Read `claims` (and `transactions`)
+  before anything else, because a second claim is a second bid.
+
+### The claim lifecycle: claim, claims, cancel-claim
+
+A claim waits in ESPN's queue until waivers process. Until then it can be
+seen and withdrawn:
+
+```bash
+# Submit. The answer carries provider_transaction_id, the claim's id.
+fantasy-sports claim --team "My Team" --player "Player D" --drop "Player A" --acknowledge-irreversible "D starts Sunday; gate PROCEED"
+# See what is queued: one row per pending claim, newest first, by id.
+fantasy-sports claims --team "My Team"
+# Withdraw one before it processes.
+fantasy-sports cancel-claim --team "My Team" --id CLAIM_ID
+```
+
+- **`claims` is ESPN's queue, not the transaction log.** A cancelled claim
+  leaves it at once, while its own row in `transactions` keeps reading
+  `PENDING`. Ask `claims` whether something is still queued. `--team`
+  defaults to your own team; another team's queue is readable too.
+- **`cancel-claim` takes only an id in your team's queue now.** Another
+  team's claim, one that already processed, or one already cancelled is
+  `CONFIG_INVALID` pointing at `claims`, and nothing is sent.
+- **A cancel needs no `--acknowledge-irreversible`.** It spends no FAAB and no
+  priority and changes no roster, so the owner's notify hook does not run for
+  it. It is still `reversible: false`: undoing it is a new claim.
+- **Two ids, both journaled.** ESPN answers a cancel with a new transaction
+  id, `provider_transaction_id`. The claim it withdrew is
+  `cancelled_claim_id`. `read_back.verified` is `true` once the claim is gone
+  from the queue.
+- **Editing a bid is cancel, then claim again.** There is no edit in place.
 
 ### Being told about irreversible writes
 

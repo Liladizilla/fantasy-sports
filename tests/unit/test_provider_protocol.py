@@ -353,6 +353,7 @@ def test_the_writing_protocol_surface_is_exactly_what_issue_107_requires():
         "set_lineup",
         "move_players",
         "cancel_transaction",
+        "fetch_pending_claims",
     )
     for method in WRITING_PROVIDER_METHODS:
         assert callable(getattr(WritingProvider, method))

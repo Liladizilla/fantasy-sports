@@ -67,6 +67,7 @@ from fantasy_sports.core.models import (
     FreeAgent,
     League,
     Matchup,
+    PendingClaim,
     RosterMove,
     RosterSlot,
     SessionRole,
@@ -212,6 +213,7 @@ WRITING_PROVIDER_METHODS: Final[tuple[str, ...]] = (
     "set_lineup",
     "move_players",
     "cancel_transaction",
+    "fetch_pending_claims",
 )
 
 
@@ -285,4 +287,17 @@ class WritingProvider(Protocol):
         self, league_id: str, season: int, team_id: str, transaction_id: str
     ) -> WriteResult:
         """Withdraw a pending transaction (a queued waiver claim)."""
+        ...
+
+    def fetch_pending_claims(
+        self, league_id: str, season: int, team_id: str | None = None
+    ) -> list[PendingClaim]:
+        """The waiver claims queued and not yet processed, by transaction id.
+
+        Read from the provider's queue, not inferred from its transaction log:
+        on ESPN a cancelled claim's own log row keeps reading ``PENDING``.
+        ``team_id`` narrows to one team's claims; reading another team's queue
+        is a read, so it is not ownership-guarded. A queue whose shape changed
+        is ``SCHEMA_DRIFT``, never an empty list.
+        """
         ...

@@ -737,3 +737,55 @@ register(
         ),
     )
 )
+
+# --------------------------------------------------------------------------- #
+# The waiver queue (jwulff/fantasy-sports#109)
+# --------------------------------------------------------------------------- #
+# `cancel-claim`, not `claim cancel`: a typer group named `claim` would shadow
+# the top-level `claim` command, so `claim --player ...` would stop parsing.
+
+register(
+    CommandSpec(
+        name="claims",
+        summary="List a team's pending waiver claims by transaction id, newest first.",
+        handler="fantasy_sports.commands.claims:list_claims",
+        shape=DataShape.COLLECTION,
+        params=(
+            Param(
+                name="team",
+                help="The team whose queue to read: id, or its name (case-insensitive; a "
+                "unique prefix is enough). Defaults to the session's own team; required "
+                "when the session owns none or more than one.",
+                annotation=str | None,
+            ),
+        ),
+    )
+)
+
+register(
+    CommandSpec(
+        name="cancel-claim",
+        summary="Withdraw one of your own pending waiver claims by its transaction id. Writes.",
+        handler="fantasy_sports.commands.claims:cancel_claim",
+        shape=DataShape.OBJECT,
+        params=(
+            _TEAM_PARAM,
+            Param(
+                name="id",
+                help="The claim's transaction id: `provider_id` in `claims`, or the "
+                "`provider_transaction_id` that `claim` returned. Refused unless it is in "
+                "this team's pending queue now. Needs no --acknowledge-irreversible: a "
+                "cancel spends nothing.",
+                annotation=str,
+                required=True,
+            ),
+            Param(
+                name="dry_run",
+                help="Check the claim is queued and report what would be sent. Sends and "
+                "journals nothing.",
+                annotation=bool,
+                default=False,
+            ),
+        ),
+    )
+)
