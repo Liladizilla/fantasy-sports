@@ -1,0 +1,31 @@
+{
+  "schema": "fantasy-sports/v1",
+  "provider": "espn",
+  "league_id": "99",
+  "season": 2026,
+  "generated_at": "2026-08-26T18:04:11Z",
+  "data_as_of": null,
+  "data_age_seconds": null,
+  "sources": [],
+  "untrusted": {},
+  "raw_omitted": false,
+  "data": null,
+  "error": {
+    "code": "WRITE_DIVERGED",
+    "message": "ESPN accepted the lineup change but the roster read back differently.",
+    "retryable": false,
+    "agent_action": "Do not retry; the write may have applied. Read the roster and reconcile.",
+    "remediation": "Read the roster, then decide whether to re-apply the change.",
+    "details": {
+      "expected": {
+        "3139": "RB",
+        "4046": "BE"
+      },
+      "observed": {
+        "3139": "BE",
+        "4046": "BE"
+      }
+    },
+    "health": null
+  }
+}

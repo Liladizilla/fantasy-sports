@@ -152,9 +152,23 @@ def test_error_sample_carries_a_taxonomy_code_and_its_exit_status(name: str):
     }
 
 
+# Codes no shipped command can emit yet. Their only sample is a hand-authored
+# golden under tests/unit/golden/, because a docs sample needs a real command
+# line and faking one would fail test_readme. Delete each entry when the first
+# command that raises it lands (#107 onward) and add the sample in the same PR.
+AWAITING_A_COMMAND = {"WRITE_REJECTED", "WRITE_DIVERGED"}
+
+
 def test_every_taxonomy_code_has_at_least_one_sample():
     sampled = {_payload(n)["error"]["code"] for n in ERROR_SAMPLES if INDEX[n]["format"] == "json"}
-    assert sampled == {code.value for code in ErrorCode}
+    assert sampled == {code.value for code in ErrorCode} - AWAITING_A_COMMAND
+
+
+@pytest.mark.parametrize("name", ["error-write-rejected.json", "error-write-diverged.json"])
+def test_the_codes_awaiting_a_command_have_a_golden_instead(name: str):
+    golden = Path(__file__).parent / "golden" / name
+    code = json.loads(golden.read_text(encoding="utf-8"))["error"]["code"]
+    assert code in AWAITING_A_COMMAND
 
 
 def test_usage_errors_are_sampled_as_prose_with_exit_two():

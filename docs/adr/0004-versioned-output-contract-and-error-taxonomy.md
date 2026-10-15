@@ -14,7 +14,10 @@ and it gains a `details.kind` (`"config"` or `"argument"`) discriminator
 `fetched_at` means on a cache hit, after it shipped decorative
 (jwulff/fantasy-sports#51). **Amended:** 2026-09-09 — `raw_omitted` added to
 the envelope and `--no-raw` added as a global option
-(jwulff/fantasy-sports#52).
+(jwulff/fantasy-sports#52). **Amended:** 2026-10-14 by
+[ADR-0010](0010-write-codes-one-code-with-a-kind-discriminator.md) —
+`WRITE_REJECTED` (exit 11) and `WRITE_DIVERGED` (exit 12) added for the write
+surface (jwulff/fantasy-sports#106).
 
 (jwulff/fantasy-sports#6). 2026-09-08 — `NOT_AVAILABLE` added to the taxonomy
 (jwulff/fantasy-sports#45).

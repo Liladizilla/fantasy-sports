@@ -41,12 +41,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from enum import StrEnum
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Final
 
 from fantasy_sports.core.redaction import redact, scrub
 
 __all__ = [
     "ERROR_TYPES",
+    "WRITE_REJECTED_KINDS",
     "AuthExpiredError",
     "AuthMissingError",
     "ConfigInvalidError",
@@ -57,6 +58,8 @@ __all__ = [
     "ProviderUnavailableError",
     "RateLimitedError",
     "SchemaDriftError",
+    "WriteDivergedError",
+    "WriteRejectedError",
     "error_type_for",
 ]
 
@@ -72,6 +75,8 @@ class ErrorCode(StrEnum):
     PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
     RATE_LIMITED = "RATE_LIMITED"
     SCHEMA_DRIFT = "SCHEMA_DRIFT"
+    WRITE_REJECTED = "WRITE_REJECTED"
+    WRITE_DIVERGED = "WRITE_DIVERGED"
 
 
 class FantasySportsError(Exception):
@@ -297,6 +302,138 @@ class SchemaDriftError(FantasySportsError):
             self._record_detail("provider", provider)
 
 
+WRITE_REJECTED_KINDS: Final[tuple[str, ...]] = (
+    "roster_lock",
+    "slot_limit",
+    "same_slot",
+    "not_current_period",
+    "budget_exceeded",
+    "position_limit",
+    "already_dropped",
+    "roster_full",
+    "not_owned",
+    "auth",
+    "unknown",
+)
+"""The closed vocabulary for :attr:`WriteRejectedError.kind`. We own it.
+
+A reason ESPN adds that we have not mapped yet lands on ``"unknown"`` with the
+provider's own string in ``provider_type``, so it is reported rather than lost
+and adding it later is not an API change. ``"not_owned"`` is ours, not ESPN's:
+the client-side guard that refuses a write for a team the session does not
+own, because ESPN does not (``docs/research/05-espn-write-surface.md`` §6).
+"""
+
+
+class WriteRejectedError(FantasySportsError):
+    """The provider refused a write, or we refused it before sending.
+
+    One code with a closed ``kind`` discriminator, not one code per reason
+    (ADR-0010, the same move ADR-0009 made for ``CONFIG_INVALID``). Every reason
+    tells an agent the same thing: this exact request will not succeed, so do
+    not repeat it; read the roster and re-plan. ``kind`` is for the consumer
+    that wants to *choose* the re-plan, and it never changes ``retryable`` or
+    the exit status.
+
+    **A write-host 401 with a credential sent is ``kind="auth"``, never
+    :class:`AuthExpiredError`.** The write host's 401 body is a constant that
+    does not distinguish expired from absent from refused, and every write is
+    preceded by a read of the same league on the same cookie, so that read
+    having just succeeded is evidence the session is valid. ``AUTH_EXPIRED``
+    needs positive evidence and this is not it (brief §5.1 item 1;
+    ``docs/memory/espn-401-tells-you-nothing.md``).
+
+    ``provider_type`` carries ESPN's ``details[0].type`` verbatim and is
+    ``None`` when ESPN sent none. ``transaction_applied`` is always ``False``,
+    because a rejection never applies (a ``409`` does not, brief §3). It is not a
+    parameter, so no raise site can claim otherwise; it is in ``details`` so a
+    consumer never has to infer it.
+
+    ``kind`` defaults to ``"unknown"``, the honest answer when a raise site has
+    not classified the reason, as ``ConfigInvalidError`` defaults to ``"config"``.
+    An unknown ``kind`` is a bug in the caller, so it raises ``ValueError``
+    rather than becoming a taxonomy error.
+    """
+
+    code = ErrorCode.WRITE_REJECTED
+    retryable = False
+    agent_action = "Do not retry unchanged; read the roster and re-plan."
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: str = "unknown",
+        provider_type: str | None = None,
+        http_status: int | None = None,
+        team_id: str | int | None = None,
+        remediation: str | None = None,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        if kind not in WRITE_REJECTED_KINDS:
+            raise ValueError(
+                f"unknown WRITE_REJECTED kind {kind!r}; expected one of {WRITE_REJECTED_KINDS}"
+            )
+        super().__init__(message, remediation=remediation, details=details)
+        self.kind = kind
+        # Attributes hold the scrubbed value, not the original: `vars(exc)` and a
+        # captured-locals traceback repr read them, not `details`
+        # (docs/memory/credential-leak-channels.md, channel 1).
+        self.provider_type = None if provider_type is None else redact(provider_type)
+        self.http_status = http_status
+        self.team_id = None if team_id is None else redact(str(team_id))
+        # A rejection never applied (a 409 does not apply, brief §3), so this is
+        # a constant, not an argument a raise site could get wrong.
+        self.transaction_applied = False
+        # All five, always, so the payload shape does not depend on the reason.
+        self._record_detail("kind", kind)
+        self._record_detail("provider_type", self.provider_type)
+        self._record_detail("http_status", http_status)
+        self._record_detail("team_id", self.team_id)
+        self._record_detail("transaction_applied", False)
+
+
+class WriteDivergedError(FantasySportsError):
+    """A write was accepted, but the read-back does not match what was asked.
+
+    The opposite failure from :class:`WriteRejectedError`: the provider said
+    yes and the world is not as we asked, so the transaction may well have
+    applied (or something else moved the roster in between). Retrying could
+    double-apply, which is why it is not folded into a rejection and why it
+    gets its own exit status.
+
+    ``expected`` and ``observed`` are field-name-level maps (player id to
+    slot id, or similar) of only the entries that disagree. Never put
+    provider free text in them.
+    """
+
+    code = ErrorCode.WRITE_DIVERGED
+    retryable = False
+    agent_action = "Do not retry; the write may have applied. Read the roster and reconcile."
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        expected: Mapping[str, Any] | None = None,
+        observed: Mapping[str, Any] | None = None,
+        remediation: str | None = None,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message, remediation=remediation, details=details)
+        # `scrub` walks values but not mapping keys, and these maps are keyed by
+        # caller-supplied ids, so the keys are redacted here.
+        # The attributes hold the scrubbed maps for the same reason `details` does.
+        self.expected: dict[str, Any] = {
+            redact(str(k)): scrub(v) for k, v in dict(expected or {}).items()
+        }
+        self.observed: dict[str, Any] = {
+            redact(str(k)): scrub(v) for k, v in dict(observed or {}).items()
+        }
+        self._record_detail("expected", self.expected)
+        self._record_detail("observed", self.observed)
+
+
 ERROR_TYPES: tuple[type[FantasySportsError], ...] = (
     AuthMissingError,
     AuthExpiredError,
@@ -306,6 +443,8 @@ ERROR_TYPES: tuple[type[FantasySportsError], ...] = (
     ProviderUnavailableError,
     RateLimitedError,
     SchemaDriftError,
+    WriteRejectedError,
+    WriteDivergedError,
 )
 
 _BY_CODE: dict[str, type[FantasySportsError]] = {cls.code.value: cls for cls in ERROR_TYPES}

@@ -8,7 +8,7 @@ contract: changing one is an API change, exactly like renaming a code.
 The range matters. ``0`` means success, ``1`` is the conventional catch-all,
 ``2`` is the usage error every argument parser emits, and ``126``, ``127`` and
 ``128+n`` are claimed by the shell for "not executable", "not found" and "killed
-by signal N". Everything here sits between ``3`` and ``9``, which is inside the
+by signal N". Everything here sits between ``3`` and ``12``, which is inside the
 portable range and leaves room to grow without colliding with any of that.
 
 :func:`classify` implements R12's hard rule: **an unclassifiable failure maps to
@@ -47,6 +47,8 @@ EXIT_CODES: dict[ErrorCode, int] = {
     ErrorCode.RATE_LIMITED: 8,
     ErrorCode.SCHEMA_DRIFT: 9,
     ErrorCode.NOT_AVAILABLE: 10,
+    ErrorCode.WRITE_REJECTED: 11,
+    ErrorCode.WRITE_DIVERGED: 12,
 }
 """Taxonomy code -> process exit status. One status per code, and never zero."""
 

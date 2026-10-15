@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from fantasy_sports.core.errors import (
     ERROR_TYPES,
+    WRITE_REJECTED_KINDS,
     AuthExpiredError,
     AuthMissingError,
     ConfigInvalidError,
@@ -19,6 +20,8 @@ from fantasy_sports.core.errors import (
     ProviderUnavailableError,
     RateLimitedError,
     SchemaDriftError,
+    WriteDivergedError,
+    WriteRejectedError,
     error_type_for,
 )
 from fantasy_sports.core.models import (
@@ -41,6 +44,7 @@ __all__ = [
     "ERROR_TYPES",
     "NORMALIZED_MODELS",
     "TRANSACTION_TYPES",
+    "WRITE_REJECTED_KINDS",
     "AuthExpiredError",
     "AuthMissingError",
     "ConfigInvalidError",
@@ -61,5 +65,7 @@ __all__ = [
     "SchemaDriftError",
     "Team",
     "Transaction",
+    "WriteDivergedError",
+    "WriteRejectedError",
     "error_type_for",
 ]

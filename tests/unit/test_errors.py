@@ -15,6 +15,7 @@ import pytest
 
 from fantasy_sports.core.errors import (
     ERROR_TYPES,
+    WRITE_REJECTED_KINDS,
     AuthExpiredError,
     AuthMissingError,
     ConfigInvalidError,
@@ -25,6 +26,8 @@ from fantasy_sports.core.errors import (
     ProviderUnavailableError,
     RateLimitedError,
     SchemaDriftError,
+    WriteDivergedError,
+    WriteRejectedError,
     error_type_for,
 )
 from fantasy_sports.core.redaction import REDACTED, forget_secrets, remember_secret
@@ -39,6 +42,8 @@ DOCUMENTED_CODES = {
     "PROVIDER_UNAVAILABLE",
     "RATE_LIMITED",
     "SCHEMA_DRIFT",
+    "WRITE_REJECTED",
+    "WRITE_DIVERGED",
 }
 
 # A sentinel that cannot occur by accident anywhere in rendered output.
@@ -94,6 +99,8 @@ def test_credential_failures_are_not_retryable_and_availability_is():
     assert NotAvailableError("espn refuses this request").retryable is False
     assert ProviderUnavailableError("espn 503").retryable is True
     assert RateLimitedError("slow down").retryable is True
+    assert WriteRejectedError("locked", kind="roster_lock").retryable is False
+    assert WriteDivergedError("moved").retryable is False
 
 
 def test_a_positive_refusal_is_not_an_unclassifiable_one():
@@ -301,3 +308,195 @@ def test_an_unclassifiable_failure_is_available_shaped_not_throttled():
     assert exc.code is ErrorCode.PROVIDER_UNAVAILABLE
     assert exc.retryable is True
     assert exc.code is not ErrorCode.RATE_LIMITED
+
+
+# --- WRITE_REJECTED / WRITE_DIVERGED (#106, ADR-0010) -----------------------
+
+# The write host's own 401 body, which cannot tell expired from absent from refused.
+WRITE_401_TYPE = "AUTH_MISSING_CREDENTIALS"
+
+
+def test_the_write_vocabulary_is_closed_and_exactly_the_documented_set():
+    assert set(WRITE_REJECTED_KINDS) == {
+        "roster_lock",
+        "slot_limit",
+        "same_slot",
+        "not_current_period",
+        "budget_exceeded",
+        "position_limit",
+        "already_dropped",
+        "roster_full",
+        "not_owned",
+        "auth",
+        "unknown",
+    }
+    assert len(set(WRITE_REJECTED_KINDS)) == len(WRITE_REJECTED_KINDS)
+    assert isinstance(WRITE_REJECTED_KINDS, tuple)
+
+
+def test_write_rejected_records_every_field_in_details():
+    exc = WriteRejectedError(
+        "Lineup transaction could not be completed",
+        kind="roster_lock",
+        provider_type="TRAN_LINEUP_LOCKED",
+        http_status=409,
+        team_id=1,
+        remediation="Lineup transaction could not be completed, a player is locked",
+    )
+    payload = exc.to_dict()
+    assert payload["code"] == "WRITE_REJECTED"
+    assert payload["retryable"] is False
+    assert payload["agent_action"] == "Do not retry unchanged; read the roster and re-plan."
+    assert payload["remediation"] == "Lineup transaction could not be completed, a player is locked"
+    assert payload["details"] == {
+        "kind": "roster_lock",
+        "provider_type": "TRAN_LINEUP_LOCKED",
+        "http_status": 409,
+        "team_id": "1",
+        "transaction_applied": False,
+    }
+    assert exc.kind == "roster_lock"
+    assert exc.transaction_applied is False
+
+
+def test_write_rejected_details_keys_do_not_depend_on_what_was_supplied():
+    """A client-side refusal has no provider type or status; the keys stay."""
+    details = WriteRejectedError("not yours", kind="not_owned").to_dict()["details"]
+    assert list(details) == [
+        "kind",
+        "provider_type",
+        "http_status",
+        "team_id",
+        "transaction_applied",
+    ]
+    assert details["provider_type"] is None
+    assert details["http_status"] is None
+    assert details["team_id"] is None
+    assert details["transaction_applied"] is False
+
+
+def test_write_rejected_keeps_a_caller_supplied_detail_and_the_kind_wins():
+    exc = WriteRejectedError(
+        "locked", kind="roster_lock", details={"scoring_period": 6, "kind": "forged"}
+    )
+    assert exc.details["scoring_period"] == 6
+    assert exc.details["kind"] == "roster_lock"
+
+
+def test_write_rejected_reports_a_provider_type_we_have_not_mapped():
+    exc = WriteRejectedError("new rule", kind="unknown", provider_type="TRAN_BRAND_NEW_THING")
+    assert exc.to_dict()["details"]["provider_type"] == "TRAN_BRAND_NEW_THING"
+    assert exc.to_dict()["details"]["kind"] == "unknown"
+
+
+@pytest.mark.parametrize("kind", WRITE_REJECTED_KINDS)
+def test_every_vocabulary_kind_constructs(kind):
+    assert WriteRejectedError("x", kind=kind).details["kind"] == kind
+
+
+@pytest.mark.parametrize("bad", ["", "ROSTER_LOCK", "roster-lock", "locked", "TRAN_LINEUP_LOCKED"])
+def test_an_unknown_kind_is_a_programming_error_not_a_taxonomy_error(bad):
+    with pytest.raises(ValueError, match="unknown WRITE_REJECTED kind"):
+        WriteRejectedError("x", kind=bad)
+    assert not issubclass(ValueError, FantasySportsError)
+
+
+def test_write_rejected_kind_defaults_to_unknown():
+    assert WriteRejectedError("x").kind == "unknown"
+    assert WriteRejectedError("x").to_dict()["details"]["kind"] == "unknown"
+
+
+def test_a_write_host_401_with_a_credential_sent_is_auth_not_auth_expired():
+    """Brief §5.1 item 1. The code a caller reaches for here is `WRITE_REJECTED`.
+
+    The write host's 401 is a constant that cannot tell expired from absent.
+    Nothing in the taxonomy lets `AUTH_EXPIRED` be built from it, so this pins
+    the shape the transport (#107) is told to use instead.
+    """
+    exc = WriteRejectedError(
+        "ESPN refused the write.",
+        kind="auth",
+        provider_type=WRITE_401_TYPE,
+        http_status=401,
+        team_id="1",
+    )
+    assert exc.code is ErrorCode.WRITE_REJECTED
+    assert exc.code is not ErrorCode.AUTH_EXPIRED
+    assert exc.retryable is False
+    assert exc.agent_action != AuthExpiredError.agent_action
+    assert exc.to_dict()["details"]["kind"] == "auth"
+
+
+def test_write_rejected_scrubs_a_credential_in_every_field():
+    spec = "AEBqp7WRITEs2cookie0123456789abcdefXYZ"
+    swid = "{0A1B2C3D-4E5F-6789-ABCD-EF0123456789}"
+    remember_secret(spec)
+    remember_secret(swid)
+    exc = WriteRejectedError(
+        f"POST ?espn_s2={spec} for {swid} refused",
+        kind="auth",
+        provider_type=f"TRAN_{spec}",
+        team_id=swid,
+        remediation=f"Use {spec}",
+        details={"url": f"https://x/y?espn_s2={spec}&swid={swid}"},
+    )
+    rendered = json.dumps(exc.to_dict()) + str(exc) + repr(exc) + repr(vars(exc))
+    assert spec not in rendered
+    assert swid not in rendered
+    assert REDACTED in exc.message
+    # The public attributes are what `vars()` and a captured-locals traceback read.
+    assert spec not in exc.provider_type
+    assert swid not in exc.team_id
+    assert exc.provider_type == f"TRAN_{REDACTED}"
+    assert exc.team_id == REDACTED
+
+
+def test_write_rejected_cannot_be_told_a_rejection_applied():
+    with pytest.raises(TypeError):
+        WriteRejectedError("x", kind="unknown", transaction_applied=True)  # type: ignore[call-arg]
+    assert WriteRejectedError("x").transaction_applied is False
+
+
+def test_write_diverged_carries_expected_and_observed():
+    exc = WriteDivergedError(
+        "Read-back does not match.",
+        expected={"3139": "RB", 4046: "BE"},
+        observed={"3139": "BE", "4046": "BE"},
+    )
+    payload = exc.to_dict()
+    assert payload["code"] == "WRITE_DIVERGED"
+    assert payload["retryable"] is False
+    assert payload["agent_action"]
+    assert payload["details"] == {
+        "expected": {"3139": "RB", "4046": "BE"},
+        "observed": {"3139": "BE", "4046": "BE"},
+    }
+    assert exc.expected == payload["details"]["expected"]
+
+
+def test_write_diverged_with_nothing_supplied_still_names_both_fields():
+    assert WriteDivergedError("moved").to_dict()["details"] == {"expected": {}, "observed": {}}
+
+
+def test_write_diverged_copies_its_maps():
+    expected = {"1": "RB"}
+    exc = WriteDivergedError("moved", expected=expected)
+    expected["1"] = "mutated"
+    assert exc.to_dict()["details"]["expected"] == {"1": "RB"}
+
+
+def test_write_diverged_scrubs_its_maps():
+    remember_secret(SECRET)
+    exc = WriteDivergedError("moved", expected={"1": SECRET}, observed={SECRET: "RB"})
+    assert SECRET not in json.dumps(exc.to_dict())
+    assert SECRET not in json.dumps(exc.expected) + json.dumps(exc.observed)
+    assert SECRET not in repr(vars(exc))
+
+
+def test_a_rejection_and_a_divergence_are_distinguishable():
+    """A rejection did not apply; a divergence may have. Different next steps."""
+    rejected = WriteRejectedError("no", kind="slot_limit")
+    diverged = WriteDivergedError("moved")
+    assert rejected.code is not diverged.code
+    assert rejected.agent_action != diverged.agent_action
+    assert rejected.details["transaction_applied"] is False

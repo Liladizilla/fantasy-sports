@@ -44,6 +44,8 @@ from fantasy_sports.core.errors import (
     ProviderUnavailableError,
     RateLimitedError,
     SchemaDriftError,
+    WriteDivergedError,
+    WriteRejectedError,
 )
 from fantasy_sports.core.models import Player
 from fantasy_sports.core.redaction import REDACTED, forget_secrets, remember_secret
@@ -528,6 +530,38 @@ def test_golden_error_renderer():
     assert json_renderer.render(sample_error_envelope()) == (GOLDEN / "error.json").read_text()
 
 
+def _write_error_envelopes() -> dict[str, Envelope]:
+    rejected = WriteRejectedError(
+        "ESPN rejected the lineup change.",
+        kind="roster_lock",
+        provider_type="TRAN_LINEUP_LOCKED",
+        http_status=409,
+        team_id="1",
+        remediation="Lineup transaction could not be completed, a player is locked",
+    )
+    diverged = WriteDivergedError(
+        "ESPN accepted the lineup change but the roster read back differently.",
+        expected={"3139": "RB", "4046": "BE"},
+        observed={"3139": "BE", "4046": "BE"},
+        remediation="Read the roster, then decide whether to re-apply the change.",
+    )
+    return {
+        "error-write-rejected.json": Envelope.failure(
+            rejected, provider="espn", league_id="99", season=2026, generated_at=GENERATED_AT
+        ),
+        "error-write-diverged.json": Envelope.failure(
+            diverged, provider="espn", league_id="99", season=2026, generated_at=GENERATED_AT
+        ),
+    }
+
+
+@pytest.mark.parametrize("name", ["error-write-rejected.json", "error-write-diverged.json"])
+def test_golden_write_error_renderers(name):
+    """Hand-authored goldens: no command raises these yet (#107 onward), so
+    ``docs/samples`` cannot hold them without faking a command."""
+    assert json_renderer.render(_write_error_envelopes()[name]) == (GOLDEN / name).read_text()
+
+
 def test_the_json_renderer_emits_one_parseable_document_ending_in_a_newline():
     rendered = json_renderer.render(sample_envelope())
     assert rendered.endswith("\n")
@@ -740,6 +774,10 @@ def _instance(cls):
         return cls("ESPN throttled the request.", retry_after=30.0)
     if cls is SchemaDriftError:
         return cls("Team payload lost a required field.", path="Team.wins", provider="espn")
+    if cls is WriteRejectedError:
+        return cls("Lineup is locked.", kind="roster_lock", provider_type="TRAN_LINEUP_LOCKED")
+    if cls is WriteDivergedError:
+        return cls("Read-back differs.", expected={"3139": "RB"}, observed={"3139": "BE"})
     return cls(f"{cls.__name__} happened.")
 
 

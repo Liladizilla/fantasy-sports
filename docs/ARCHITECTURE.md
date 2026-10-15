@@ -224,6 +224,8 @@ down" (retry later) without parsing English:
 | `PROVIDER_UNAVAILABLE` | ESPN 5xx / timeout | Retry with backoff |
 | `RATE_LIMITED` | Throttled | Retry after `retry_after` |
 | `SCHEMA_DRIFT` | Response shape unrecognized | Stop; file an issue |
+| `WRITE_REJECTED` | A write was refused by ESPN, or by our own pre-flight; nothing applied | Do not retry unchanged; read the roster and re-plan; branch on `details.kind` |
+| `WRITE_DIVERGED` | ESPN accepted a write but the read-back differs from what was asked | Do not retry; the write may have applied; read the roster and reconcile |
 
 Every error payload carries `code`, `message`, `retryable`, `agent_action`,
 `remediation` and `details`, all of them always present and `null` when empty.
@@ -236,7 +238,7 @@ consumers never read (ADR-0004 as amended, decided on #6).
 Each code carries its own **exit status** so a cron job can branch without
 parsing anything: `AUTH_MISSING` 3, `AUTH_EXPIRED` 4, `LEAGUE_NOT_FOUND` 5,
 `CONFIG_INVALID` 6, `PROVIDER_UNAVAILABLE` 7, `RATE_LIMITED` 8, `SCHEMA_DRIFT` 9,
-`NOT_AVAILABLE` 10; `0` success, `1` an unclassified crash, `2` a usage error.
+`NOT_AVAILABLE` 10, `WRITE_REJECTED` 11, `WRITE_DIVERGED` 12; `0` success, `1` an unclassified crash, `2` a usage error.
 
 **`CONFIG_INVALID` covers two causes, not one (ADR-0004 amended by ADR-0009).**
 A `config.toml` that will not parse and a CLI argument ESPN itself rejects — a
@@ -246,6 +248,27 @@ they tell an agent the identical thing: stop, ask a human, retrying unchanged
 cannot work. There is no eighth code for the second cause; `details.kind`
 (`"config"` or `"argument"`) is the discriminator for a consumer that wants to
 tell them apart without a second exit status to branch on.
+
+**`WRITE_REJECTED` is one code with a closed `details.kind`, not one code per
+reason (ADR-0010).** `kind` is one of `roster_lock`, `slot_limit`, `same_slot`,
+`not_current_period`, `budget_exceeded`, `position_limit`, `already_dropped`,
+`roster_full`, `not_owned`, `auth`, `unknown`. The payload also carries
+`provider_type` (ESPN's `TRAN_*` string verbatim, so a reason we have not
+mapped is reported as `unknown` rather than lost), `http_status`, `team_id`,
+and `transaction_applied`. `not_owned` is ours, not ESPN's: the client-side
+guard, because ESPN does not reject a commissioner's cross-team write.
+`WRITE_DIVERGED` is the opposite failure: ESPN said yes and the roster read
+back differently, so the transaction may have applied and a retry could
+double-apply. It carries `details.expected` and `details.observed`, field
+names and ids only.
+
+**A write-host 401 never becomes `AUTH_EXPIRED`.** The write host's 401 body is
+one constant for no cookie, an invalid cookie, and a missing SWID, and every
+write is preceded by a read of the same league on the same cookie, so that
+read having just succeeded is evidence the session is valid. With nothing sent
+the code is `AUTH_MISSING`. With a credential sent it is `WRITE_REJECTED`
+with `kind: "auth"` (research brief `docs/research/05-espn-write-surface.md`
+§5.1 item 1).
 
 **stdout stays byte-empty on failure**, and a failure is always JSON whatever
 `--output` asked for. A consumer piping stdout into a parser must never receive

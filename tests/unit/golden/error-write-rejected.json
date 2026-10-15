@@ -1,0 +1,28 @@
+{
+  "schema": "fantasy-sports/v1",
+  "provider": "espn",
+  "league_id": "99",
+  "season": 2026,
+  "generated_at": "2026-08-26T18:04:11Z",
+  "data_as_of": null,
+  "data_age_seconds": null,
+  "sources": [],
+  "untrusted": {},
+  "raw_omitted": false,
+  "data": null,
+  "error": {
+    "code": "WRITE_REJECTED",
+    "message": "ESPN rejected the lineup change.",
+    "retryable": false,
+    "agent_action": "Do not retry unchanged; read the roster and re-plan.",
+    "remediation": "Lineup transaction could not be completed, a player is locked",
+    "details": {
+      "kind": "roster_lock",
+      "provider_type": "TRAN_LINEUP_LOCKED",
+      "http_status": 409,
+      "team_id": "1",
+      "transaction_applied": false
+    },
+    "health": null
+  }
+}
