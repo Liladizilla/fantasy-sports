@@ -444,15 +444,21 @@ class Journal:
         proposed_at: datetime | None,
         applied_state: Mapping[str, Any] | None,
         status: str = "executed",
+        error: FantasySportsError | None = None,
     ) -> JournalEntry:
         """Close a ``pending`` entry with what ESPN's response carried.
 
         ``member_id`` is the response's ``memberId``, not the one sent.
-        ``proposed_at`` is ESPN's ``proposedDate``. Raises if the entry is not
+        ``proposed_at`` is ESPN's ``proposedDate``. ``error`` is the
+        ``WRITE_DIVERGED`` a read-back raised, stored with a ``diverged``
+        entry so the row (and the owner's notification) says what disagreed;
+        an ``executed`` entry has none. Raises if the entry is not
         ``pending``: a journal row closes once.
         """
         if status not in ("executed", "diverged"):
             raise ValueError("complete() closes an entry as 'executed' or 'diverged'")
+        if error is not None and status != "diverged":
+            raise ValueError("only a 'diverged' entry carries an error")
         return self._close(
             entry_id,
             status=status,
@@ -460,7 +466,7 @@ class Journal:
             provider_transaction_id=provider_transaction_id,
             proposed_at=proposed_at,
             applied_state=applied_state,
-            error=None,
+            error=None if error is None else error.to_dict(),
         )
 
     def reject(self, entry_id: str, error: FantasySportsError) -> JournalEntry:

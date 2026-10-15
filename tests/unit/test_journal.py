@@ -272,6 +272,43 @@ def test_complete_records_espns_ids_and_the_member_espn_echoed(path: Path):
     assert Journal.open(path).get(entry.id) == closed
 
 
+def test_a_diverged_completion_keeps_espns_ids_and_the_divergence(path: Path):
+    from fantasy_sports.core.errors import WriteDivergedError
+
+    journal = Journal.open(path)
+    entry = journal.begin(make())
+    error = WriteDivergedError("read back differently", expected={"1": 0}, observed={"1": 20})
+    closed = journal.complete(
+        entry.id,
+        member_id=MEMBER_GUID,
+        provider_transaction_id="b4e1c2d0-0000-4000-8000-000000000002",
+        proposed_at=None,
+        applied_state={"1": 20},
+        status="diverged",
+        error=error,
+    )
+    assert closed.status == "diverged"
+    assert closed.provider_transaction_id == "b4e1c2d0-0000-4000-8000-000000000002"
+    assert closed.error == error.to_dict()
+
+
+def test_an_executed_completion_cannot_carry_an_error(path: Path):
+    from fantasy_sports.core.errors import WriteDivergedError
+
+    journal = Journal.open(path)
+    entry = journal.begin(make())
+    with pytest.raises(ValueError, match="only a 'diverged' entry"):
+        journal.complete(
+            entry.id,
+            member_id=None,
+            provider_transaction_id=None,
+            proposed_at=None,
+            applied_state=None,
+            error=WriteDivergedError("x"),
+        )
+    assert journal.get(entry.id).status == "pending"
+
+
 def test_the_same_member_gets_the_same_attribution_every_time(path: Path):
     journal = Journal.open(path)
     ids = []

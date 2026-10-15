@@ -349,6 +349,8 @@ def test_a_read_back_that_disagrees_is_write_diverged_with_the_differing_players
     assert entry.status == "diverged"
     assert entry.provider_transaction_id == TRANSACTION_ID
     assert entry.applied_state == {"2002": "RB", "2003": "BE"}
+    assert entry.error is not None and entry.error["code"] == "WRITE_DIVERGED"
+    assert entry.error["details"]["diverged"] == ["2002", "2003"]
 
 
 def test_a_write_applied_as_another_account_is_journaled_as_diverged(

@@ -2,6 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-10-14
+**Amended:** 2026-10-15 (#18: `player_on_waivers`, `player_unavailable`)
 **Amends:** ADR-0004 (the taxonomy gains `WRITE_REJECTED` at exit 11 and
 `WRITE_DIVERGED` at exit 12)
 
@@ -34,13 +35,23 @@ transaction may have applied.
 **`WRITE_REJECTED` carries the reason in `details.kind`, a closed vocabulary we
 own:** `roster_lock`, `slot_limit`, `same_slot`, `not_current_period`,
 `budget_exceeded`, `position_limit`, `already_dropped`, `roster_full`,
-`not_owned`, `auth`, `unknown`. Its `details` always hold five keys: `kind`,
+`player_on_waivers`, `player_unavailable`, `not_owned`, `auth`, `unknown`. Its `details` always hold five keys: `kind`,
 `provider_type` (ESPN's string verbatim, or `null`), `http_status`, `team_id`
 (a string), and `transaction_applied` (always `false`, and not a constructor argument, because a rejection never applies). The vocabulary is a
 `Final` tuple exported from `core/errors.py`. A `kind` outside it raises
 `ValueError`: it is a bug in the raise site, not a failure to report.
 `kind` defaults to `unknown`, as `ConfigInvalidError.kind` defaults to
 `config`.
+
+**Amended 2026-10-15 (#18): two availability kinds.** The add/drop capture
+(`docs/research/06-espn-add-drop-surface.md`) observed two refusals that ask
+the agent for different re-plans, and neither fits an existing kind.
+`TRAN_PLAYER_NOT_FREEAGENT` is `player_on_waivers`: the player is on waivers,
+so file a claim instead. `TRAN_PLAYER_NOT_AVAILABLE` is `player_unavailable`:
+the player is on another roster, so pick someone else. By this ADR's own
+terms, extending the vocabulary is not an API change. `TRAN_ACQUISITION_BUDGET_NOT_SUPPORTED`
+stays `unknown`, because `claim` refuses a bid in a budgetless league before
+sending.
 
 **`not_owned` is ours.** ESPN does not reject a commissioner's cross-team
 write (brief §6), so ownership is a client-side guard and needs a name in the

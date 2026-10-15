@@ -622,3 +622,118 @@ register(
         ),
     )
 )
+
+# --------------------------------------------------------------------------- #
+# Irreversible writes (jwulff/fantasy-sports#18)
+# --------------------------------------------------------------------------- #
+
+_TEAM_PARAM = Param(
+    name="team",
+    help="Your own team: id, or its name (case-insensitive; a unique prefix is enough). "
+    "Any team the session does not own is refused.",
+    annotation=str,
+    required=True,
+)
+
+_ACKNOWLEDGE_PARAM = Param(
+    name="acknowledge_irreversible",
+    help="Why you are making this move, in words. Required to send: the move cannot be "
+    "undone, and the reason is journaled verbatim. An autonomous agent clears /sanity-gate "
+    "before passing it. Not needed with --dry-run.",
+    annotation=str | None,
+)
+
+_MOVE_DRY_RUN_PARAM = Param(
+    name="dry_run",
+    help="Report the items, the cost, and what cannot be undone. Sends and journals "
+    "nothing; does not validate that ESPN would accept the move.",
+    annotation=bool,
+    default=False,
+)
+
+_DROP_PARAM = Param(
+    name="drop",
+    help="A player on your roster to release in the same transaction: id, or a name "
+    "unique on the roster. That player goes to waivers.",
+    annotation=str | None,
+)
+
+register(
+    CommandSpec(
+        name="add",
+        summary="Add a free agent to your own team, optionally dropping a player. Irreversible.",
+        handler="fantasy_sports.commands.moves:add_player",
+        shape=DataShape.OBJECT,
+        params=(
+            _TEAM_PARAM,
+            Param(
+                name="player",
+                help="The free agent to add: id, or a name matching one player in this "
+                "week's pool (`free-agents`). A player on waivers needs `claim`.",
+                annotation=str,
+                required=True,
+            ),
+            _DROP_PARAM,
+            Param(
+                name="slot",
+                help="Lineup slot for the added player (QB, RB, WR, TE, RB/WR/TE, D/ST, K, "
+                "BE). Omitted, ESPN places the player.",
+                annotation=str | None,
+            ),
+            _ACKNOWLEDGE_PARAM,
+            _MOVE_DRY_RUN_PARAM,
+        ),
+    )
+)
+
+register(
+    CommandSpec(
+        name="drop",
+        summary="Release a player from your own team to waivers. Irreversible.",
+        handler="fantasy_sports.commands.moves:drop_player",
+        shape=DataShape.OBJECT,
+        params=(
+            _TEAM_PARAM,
+            Param(
+                name="player",
+                help="The player to release: id, or a name unique on your roster.",
+                annotation=str,
+                required=True,
+            ),
+            _ACKNOWLEDGE_PARAM,
+            _MOVE_DRY_RUN_PARAM,
+        ),
+    )
+)
+
+register(
+    CommandSpec(
+        name="claim",
+        summary=(
+            "Submit a waiver claim, with a bid where the league uses FAAB; can drop a player. "
+            "Irreversible."
+        ),
+        handler="fantasy_sports.commands.moves:claim_player",
+        shape=DataShape.OBJECT,
+        params=(
+            _TEAM_PARAM,
+            Param(
+                name="player",
+                help="The player on waivers to claim: id, or a name matching one player in "
+                "this week's pool (`free-agents`).",
+                annotation=str,
+                required=True,
+            ),
+            Param(
+                name="bid",
+                help="FAAB bid, a whole number of 0 or more, spent only if the claim "
+                "processes. Omit it in a league without an acquisition budget: ESPN "
+                "rejects any bid there.",
+                annotation=int | None,
+            ),
+            _DROP_PARAM,
+            _ACKNOWLEDGE_PARAM,
+            _MOVE_DRY_RUN_PARAM,
+        ),
+    )
+)

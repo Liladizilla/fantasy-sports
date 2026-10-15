@@ -842,8 +842,12 @@ WRITE_ENTRY_IDS = (
     "7a2b1c4d-3e5f-4a6b-8c7d-9e0f1a2b3c4d",
     "8b3c2d5e-4f6a-4b7c-9d8e-0f1a2b3c4d5e",
     "9c4d3e6f-5a7b-4c8d-ae9f-1a2b3c4d5e6f",
+    "ad5e4f70-6b8c-4d9e-bfa0-2b3c4d5e6f70",
 )
 """Journal entry ids the write samples mint, in order, so they are byte-stable."""
+
+MOVE_JUSTIFICATION = "Johnson is out for the season; Liskov starts this week"
+"""The ``--acknowledge-irreversible`` reason the executed ``add`` sample passes."""
 
 
 def _write_samples(recorder: Recorder) -> None:
@@ -920,9 +924,46 @@ def _write_samples(recorder: Recorder) -> None:
             raw_keys=12,
             raw_depth=3,
         )
+        _move_samples(recorder, replayed, serve)
     finally:
         requests.get, requests.post, espn_module.utc_now, journal_module.new_entry_id = saved
         path.unlink(missing_ok=True)
+
+
+def _move_samples(recorder: Recorder, replayed: Mapping[str, Any], serve: Any) -> None:
+    """``add``, ``drop``, ``claim`` (#18): three dry runs, the refusal without
+    the acknowledgement flag, and one executed add.
+
+    The write host answers a ``FREEAGENT`` body the way the community shapes
+    say ESPN does (brief §10); #108 captures the real answer. No ``[notify]``
+    table is configured, so ``notified`` shows the hook disabled.
+    """
+    add = ["add", "--team", "1", "--player", "Barbara Liskov", "--drop", "Katherine Johnson"]
+    serve("apply")
+    recorder.run("add.dry-run", [*add, "--dry-run"], **replayed)
+    recorder.run(
+        "drop.dry-run", ["drop", "--team", "1", "--player", "2003", "--dry-run"], **replayed
+    )
+    recorder.run(
+        "claim.dry-run",
+        ["claim", "--team", "1", "--player", "Radia Perlman", "--bid", "7", "--dry-run"],
+        **replayed,
+    )
+    recorder.run(
+        "error-config-invalid.acknowledge",
+        ["drop", "--team", "1", "--player", "Katherine Johnson"],
+        **replayed,
+        expect=6,
+        note="An irreversible write without --acknowledge-irreversible; nothing is sent",
+        raw_keys=12,
+    )
+    recorder.run(
+        "add",
+        [*add, "--acknowledge-irreversible", MOVE_JUSTIFICATION],
+        **replayed,
+        note="The write host answers the community-attested FREEAGENT shape; no [notify] "
+        "command is configured",
+    )
 
 
 def _auth_samples(recorder: Recorder) -> None:

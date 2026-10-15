@@ -336,6 +336,8 @@ _TRAN_KINDS: Final[Mapping[str, str]] = {
     "TRAN_INVALID_SCORINGPERIOD_NOT_CURRENT": "not_current_period",
     "TRAN_ROSTER_LIMIT_EXCEEDED_ONE": "roster_full",
     "TRAN_PLAYER_NOT_ON_TEAM": "already_dropped",
+    "TRAN_PLAYER_NOT_FREEAGENT": "player_on_waivers",
+    "TRAN_PLAYER_NOT_AVAILABLE": "player_unavailable",
 }
 """ESPN's observed ``TRAN_*`` rejection types to our closed ``WRITE_REJECTED``
 vocabulary: the lineup reasons from brief §5.1, and the add/drop reasons from
@@ -343,12 +345,15 @@ vocabulary: the lineup reasons from brief §5.1, and the add/drop reasons from
 string kept verbatim in ``provider_type``: reported, not lost, and mapping it
 later is not an API change.
 
-Observed and deliberately left ``"unknown"`` (06 §5): the availability pair
-``TRAN_PLAYER_NOT_FREEAGENT`` (on waivers; claim instead) and
-``TRAN_PLAYER_NOT_AVAILABLE`` (on another roster), which want a kind of their
-own that the vocabulary does not have yet; ``TRAN_ACQUISITION_BUDGET_NOT_SUPPORTED``
-(a bid in a league without a budget), which is not ``budget_exceeded``; and
-the three item-shape reasons, which are our bug rather than a user's."""
+The availability pair got kinds of their own in #18 (ADR-0010, amended
+2026-10-15), because each asks for a different re-plan:
+``TRAN_PLAYER_NOT_FREEAGENT`` is ``player_on_waivers`` (claim instead) and
+``TRAN_PLAYER_NOT_AVAILABLE`` is ``player_unavailable`` (on another roster;
+pick someone else). Observed and deliberately left ``"unknown"`` (06 §5):
+``TRAN_ACQUISITION_BUDGET_NOT_SUPPORTED`` (a bid in a league without a
+budget), which is not ``budget_exceeded`` and which ``claim`` refuses before
+sending; and the three item-shape reasons, which are our bug rather than a
+user's."""
 
 _UNKNOWN_STATE_REMEDIATION: Final[str] = (
     "The transaction may have applied. Read `transactions` (and `claims` for a "

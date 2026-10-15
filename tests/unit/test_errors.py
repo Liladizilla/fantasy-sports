@@ -326,6 +326,8 @@ def test_the_write_vocabulary_is_closed_and_exactly_the_documented_set():
         "position_limit",
         "already_dropped",
         "roster_full",
+        "player_on_waivers",
+        "player_unavailable",
         "not_owned",
         "auth",
         "unknown",

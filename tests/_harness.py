@@ -23,6 +23,7 @@ rather than quietly reaching ESPN.
 from __future__ import annotations
 
 import json
+import json as json_module
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -187,6 +188,7 @@ def isolate_home(tmp_path: Path, monkeypatch: Any) -> Path:
 UNLOCKED_AT = "2026-09-10T12:00:00+00:00"
 
 WRITE_CAPTURES = Path(__file__).resolve().parents[1] / "docs" / "research" / "05-espn-write-surface"
+ADD_DROP_CAPTURES = WRITE_CAPTURES.parent / "06-espn-add-drop-surface"
 
 #: Fixed so a write's success payload is byte-stable across runs.
 TRANSACTION_ID = "5d0c6e2a-7f41-4b9e-a3c8-1e6f2b9d4a70"
@@ -212,32 +214,96 @@ class WritableEspn(RecordedEspn):
 
     Install with :func:`install_writable_espn`. Reads replay the cassette
     exactly as :class:`RecordedEspn` does, except that the bootstrap's rosters
-    (and the adapter's standalone ``mRoster``) reflect every POST answered
-    ``"apply"``. ``mode`` picks the answer to the next POST:
+    (and the adapter's standalone ``mRoster``), the free-agent pool
+    (``kona_player_info``), and the pending claims in ``mTransactions2``
+    reflect every POST answered ``"apply"``. ``mode`` picks the answer to the
+    next POST:
 
-    * ``"apply"`` — 200 ``EXECUTED``, shaped like ``p3-swap-execute``, and the
-      items are applied to the rosters, so a read-back verifies;
+    * ``"apply"`` — 200, shaped like ``p3-swap-execute``, and the body takes
+      effect. A ``ROSTER`` body moves slots; a ``FREEAGENT`` body moves its
+      ``ADD`` players from the pool onto the roster and its ``DROP`` players
+      onto waivers, ``EXECUTED``; a ``WAIVER`` body is answered ``PENDING``
+      with ``isPending: true`` and queued as a pending transaction, and the
+      roster does not change; a ``CANCEL`` withdraws the queued claim it names.
     * ``"ignore"`` — the same 200, but nothing changes, so a read-back diverges;
-    * ``"reject"`` — ``p8-locked-player-move``'s 409 ``TRAN_LINEUP_LOCKED``.
+    * ``"reject"`` — a 409. By default ``p8-locked-player-move``'s
+      ``TRAN_LINEUP_LOCKED``; ``reject_capture`` names a capture in
+      ``06-espn-add-drop-surface/`` to replay instead (#108), and
+      ``reject_type`` substitutes another ``TRAN_*`` type in the p8 body.
 
-    ``posts`` records every request body sent. ``echo_member`` replaces the
-    ``memberId`` ESPN echoes, to play a write applied as another account.
+    A drops-only body arrives as ``ROSTER`` with ``DROP`` items and is applied
+    by item type, as ESPN does (brief 06). The success answers follow brief
+    06's captures in shape: a claim is ``PENDING`` with ``bidAmount`` echoed
+    (``0`` when none was sent). ``posts`` records every request body sent. ``echo_member`` replaces
+    the ``memberId`` ESPN echoes, to play a write applied as another account.
+    ``show_pending`` off hides queued claims from ``mTransactions2``, as an
+    ESPN that did not list them would.
     """
 
+    #: The free-agent pool the move tests resolve against: one free agent per
+    #: position the synthetic roster can use, and one player on waivers.
+    POOL: tuple[tuple[int, str, str, str, int, float], ...] = (
+        # id, first, last, pool status, defaultPositionId, percentOwned
+        (3001, "Barbara", "Liskov", "FREEAGENT", 4, 61.5),
+        (3002, "Radia", "Perlman", "WAIVERS", 6, 40.0),
+        (3003, "Frances", "Allen", "FREEAGENT", 2, 12.0),
+        (3004, "Frances", "Spence", "FREEAGENT", 4, 3.5),
+    )
+
     def __init__(
-        self, *, swid: str = FAKE_SWID, mode: str = "apply", echo_member: str | None = None
+        self,
+        *,
+        swid: str = FAKE_SWID,
+        mode: str = "apply",
+        echo_member: str | None = None,
+        reject_type: str | None = None,
+        reject_capture: str | None = None,
+        show_pending: bool = True,
     ) -> None:
         super().__init__()
         self.mode = mode
         self.echo_member = echo_member
+        self.reject_type = reject_type
+        self.reject_capture = reject_capture
+        self.show_pending = show_pending
         self.posts: list[dict[str, Any]] = []
+        self.pending: list[dict[str, Any]] = []
         self._bootstrap_key = next(
             key
             for key in self.bodies
             if ("view", "mTeam") in key[1] and ("view", "mRoster") in key[1]
         )
         self.overrides["mNav"] = writable_nav(swid)
+        self.pool = self._initial_pool()
+        self.overrides["kona_player_info"] = {"players": self.pool}
         self._publish(json.loads(self.bodies[self._bootstrap_key]))
+
+    def _initial_pool(self) -> list[dict[str, Any]]:
+        recorded = next(
+            json.loads(body)["players"][0]
+            for key, body in self.bodies.items()
+            if ("view", "kona_player_info") in key[1]
+        )
+        pool = []
+        for player_id, first, last, status, position, owned in self.POOL:
+            entry = _json_copy(recorded)
+            entry["id"] = player_id
+            entry["status"] = status
+            player = entry["player"]
+            player.update(
+                id=player_id,
+                firstName=first,
+                lastName=last,
+                fullName=f"{first} {last}",
+                defaultPositionId=position,
+            )
+            player["ownership"]["percentOwned"] = owned
+            if position == 2:  # RB
+                player["eligibleSlots"] = [2, 3, 23, 20, 21]
+            elif position == 6:  # TE
+                player["eligibleSlots"] = [5, 6, 23, 20, 21]
+            pool.append(entry)
+        return pool
 
     def _publish(self, bootstrap: dict[str, Any]) -> None:
         self.bootstrap = bootstrap
@@ -245,58 +311,140 @@ class WritableEspn(RecordedEspn):
         # The adapter diffs against a standalone current-period `mRoster`; the
         # bootstrap carries the same `teams[].roster` shape.
         self.overrides["mRoster"] = bootstrap
+        self.overrides["kona_player_info"] = {"players": self.pool}
+        if self.show_pending and self.pending:
+            self.overrides["mTransactions2"] = {"transactions": list(self.pending)}
+        else:
+            self.overrides.pop("mTransactions2", None)
 
     def slots(self, team_id: int = 1) -> dict[str, int]:
         """``{player_id: lineupSlotId}`` for one team, as the next read will see it."""
         team = next(t for t in self.bootstrap["teams"] if t["id"] == team_id)
         return {str(e["playerId"]): e["lineupSlotId"] for e in team["roster"]["entries"]}
 
+    def pool_ids(self) -> dict[str, str]:
+        """``{player_id: pool status}`` as the next free-agent read will see it."""
+        return {str(entry["id"]): entry["status"] for entry in self.pool}
+
     def post(self, url: str, json: Any = None, **_: Any) -> FakeResponse:  # noqa: A002
         body = json if json is not None else {}
         self.posts.append(body)
+        if self.mode == "reject" and self.reject_capture is not None:
+            capture = json_module.loads(
+                (ADD_DROP_CAPTURES / f"{self.reject_capture}.json").read_text(encoding="utf-8")
+            )
+            return FakeResponse(capture["response"]["body"], status_code=409)
         if self.mode == "reject":
             capture = _load_capture("p8-locked-player-move")
-            return FakeResponse(capture["response"]["body"], status_code=409)
+            answer = _json_copy(capture["response"]["body"])
+            if self.reject_type is not None:
+                for detail in answer.get("details", []):
+                    detail["type"] = self.reject_type
+            return FakeResponse(answer, status_code=409)
+        kind = body.get("type", "ROSTER")
+        execution = body.get("executionType", "EXECUTE")
+        status, pending = "EXECUTED", False
+        if kind == "WAIVER" and execution == "EXECUTE":
+            status, pending = "PENDING", True
+        if execution == "CANCEL":
+            status = "CANCELED"
         if self.mode == "apply":
-            updated = _json_copy(self.bootstrap)
-            team = next(t for t in updated["teams"] if t["id"] == body.get("teamId"))
-            by_id = {e["playerId"]: e for e in team["roster"]["entries"]}
-            for item in body.get("items", []):
-                by_id[item["playerId"]]["lineupSlotId"] = item["toLineupSlotId"]
-            self._publish(updated)
-        items = [
-            {
-                "fromLineupSlotId": item["fromLineupSlotId"],
-                "fromTeamId": 0,
-                "isKeeper": False,
-                "overallPickNumber": 0,
-                "playerId": item["playerId"],
-                "toLineupSlotId": item["toLineupSlotId"],
-                "toTeamId": 0,
-                "type": "LINEUP",
-            }
-            for item in body.get("items", [])
-        ]
+            self._apply(body, kind, execution)
         return FakeResponse(
             {
-                "bidAmount": 0,
-                "executionType": "EXECUTE",
+                "bidAmount": body.get("bidAmount", 0),
+                "executionType": execution,
                 "id": TRANSACTION_ID,
                 "isActingAsTeamOwner": False,
                 "isLeagueManager": False,
-                "isPending": False,
-                "items": items,
+                "isPending": pending,
+                "items": [self._echo(item) for item in body.get("items", [])],
                 "memberId": self.echo_member or self.overrides["mNav"]["members"][0]["id"],
                 "proposedDate": PROPOSED_DATE_MS,
                 "rating": 0,
                 "scoringPeriodId": body.get("scoringPeriodId"),
                 "skipTransactionCounters": False,
-                "status": "EXECUTED",
+                "status": status,
                 "subOrder": 0,
                 "teamId": body.get("teamId"),
-                "type": "ROSTER",
+                "type": kind,
             }
         )
+
+    @staticmethod
+    def _echo(item: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "fromLineupSlotId": item.get("fromLineupSlotId", -1),
+            "fromTeamId": item.get("fromTeamId", 0),
+            "isKeeper": False,
+            "overallPickNumber": 0,
+            "playerId": item["playerId"],
+            "toLineupSlotId": item.get("toLineupSlotId", -1),
+            "toTeamId": item.get("toTeamId", 0),
+            "type": item.get("type", "LINEUP"),
+        }
+
+    def _apply(self, body: Mapping[str, Any], kind: str, execution: str) -> None:
+        if execution == "CANCEL":
+            related = body.get("relatedTransactionId")
+            self.pending = [t for t in self.pending if t.get("id") != related]
+            self._publish(self.bootstrap)
+            return
+        if kind == "WAIVER":
+            self.pending.append(
+                {
+                    "id": TRANSACTION_ID,
+                    "teamId": body.get("teamId"),
+                    "type": "WAIVER",
+                    "status": "PENDING",
+                    "isPending": True,
+                    "scoringPeriodId": body.get("scoringPeriodId"),
+                    "proposedDate": PROPOSED_DATE_MS,
+                    "bidAmount": body.get("bidAmount", 0),
+                    "items": [
+                        {"playerId": i["playerId"], "type": i.get("type")}
+                        for i in body.get("items", [])
+                    ],
+                }
+            )
+            self._publish(self.bootstrap)
+            return
+        updated = _json_copy(self.bootstrap)
+        team = next(t for t in updated["teams"] if t["id"] == body.get("teamId"))
+        entries = team["roster"]["entries"]
+        for item in body.get("items", []):
+            player_id = item["playerId"]
+            if item.get("type") == "ADD":
+                pooled = next(e for e in self.pool if e["id"] == player_id)
+                self.pool = [e for e in self.pool if e["id"] != player_id]
+                entries.append(_roster_entry(pooled, team["id"], item.get("toLineupSlotId", 20)))
+            elif item.get("type") == "DROP":
+                held = next(e for e in entries if e["playerId"] == player_id)
+                entries.remove(held)
+                released = _json_copy(held["playerPoolEntry"])
+                released.update(status="WAIVERS", onTeamId=0)
+                self.pool.append(released)
+            else:
+                next(e for e in entries if e["playerId"] == player_id)["lineupSlotId"] = item[
+                    "toLineupSlotId"
+                ]
+        self._publish(updated)
+
+
+def _roster_entry(pooled: Mapping[str, Any], team_id: int, slot: int) -> dict[str, Any]:
+    """A pool entry as ``mRoster`` carries it once the player is on a team."""
+    entry = _json_copy(pooled)
+    entry.update(status="ONTEAM", onTeamId=team_id)
+    return {
+        "acquisitionDate": PROPOSED_DATE_MS,
+        "acquisitionType": "ADD",
+        "injuryStatus": entry["player"].get("injuryStatus", "ACTIVE"),
+        "lineupSlotId": slot,
+        "pendingTransactionIds": None,
+        "playerId": entry["id"],
+        "playerPoolEntry": entry,
+        "status": "NORMAL",
+    }
 
 
 def _load_capture(name: str) -> dict[str, Any]:

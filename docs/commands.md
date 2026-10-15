@@ -680,9 +680,12 @@ Options (accepted before or after the command):
   -h, --help         Show this message and exit.
 
 Commands:
+  add           Add a free agent to your own team, optionally dropping a player. Irreversible.
   auth          3 subcommands: login, logout, status
   box-scores    List both lineups for a week's matchups, player by player, with projections.
+  claim         Submit a waiver claim, with a bid where the league uses FAAB; can drop a player. Irreversible.
   doctor        Run every health check: config, credentials, cache, journal, version, provider.
+  drop          Release a player from your own team to waivers. Irreversible.
   free-agents   List unrostered players, optionally filtered to one position.
   journal       4 subcommands: digest, list, reverse, show
   league        1 subcommand: info
@@ -2510,6 +2513,527 @@ fantasy-sports lineup set --team 1 --set 2002=BE --set 'Katherine Johnson=WR' --
 ```
 <!-- /sample -->
 
+### `add`
+
+Adds a free agent to **your own team**, optionally dropping a player in the
+same ESPN transaction (a `FREEAGENT` transaction with an `ADD` item, and a
+`DROP` item with `--drop`). **Irreversible**: undoing an add later is a drop,
+and a dropped player goes to waivers where any team can claim the player first.
+
+`--player` is a player id or a case-insensitive name that matches exactly one
+player in this week's free-agent pool, the same pool `free-agents` lists. A
+rostered player is not in the pool and is refused. `--drop` is a player id or
+a name unique on your roster. `--slot` places the added player (`QB`, `RB`,
+`WR`, `TE`, `RB/WR/TE`, `D/ST`, `K`, `BE`); omitted, ESPN places the player.
+
+What happens, in order:
+
+1. A **fresh** read of the team's roster and this week's free-agent pool.
+2. **Preflight**, each a `CONFIG_INVALID` with `details.kind` of `argument`
+   naming the player, before anything is journaled or sent: a player not in
+   the pool, or a name matching more than one; a player on waivers (use
+   `claim`); a `--slot` not in the player's `eligible_slots`; a `--drop` that
+   is not on the roster.
+3. **Ownership**, as for `lineup set`: a team the session does not own is
+   `WRITE_REJECTED` with `details.kind` of `not_owned`. No override exists.
+4. **The acknowledgement gate.** Without `--acknowledge-irreversible "<why>"`,
+   or with a blank one, the command stops with `CONFIG_INVALID` whose message
+   says exactly what this move cannot undo. The reason you pass is journaled
+   verbatim and echoed as `data.acknowledged_irreversible`. The tool cannot
+   tell whether a `/sanity-gate` ran; an autonomous agent clears one before
+   it passes the flag (see the README's Writing section).
+5. A journal entry, status `pending`, `reversible: false`, with what the move
+   **costs** (`cost.bid_amount`, `cost.displaced_player_id`), the dropped
+   player's slot, and the added player's pool status, **before** the request.
+6. One POST for the league's current scoring period. A rejection is
+   `WRITE_REJECTED` with ESPN's `TRAN_*` type verbatim in
+   `details.provider_type`. Two kinds carry their own re-plan:
+   `player_on_waivers` (claim instead) and `player_unavailable` (the player
+   is on another roster; pick someone else). A type this tool has not mapped
+   yet is
+   `details.kind` `unknown`, never dropped. A timeout is
+   `PROVIDER_UNAVAILABLE` with `details.transaction_state` `unknown`, is
+   never retried, and leaves the entry `pending`: read `transactions` before
+   doing anything else.
+7. **Read-back**: the roster is re-read live. The added player must be on it
+   (in `--slot`, if one was named) and the dropped player gone; anything else
+   is `WRITE_DIVERGED` with both ids, and the entry closes `diverged`.
+8. **The owner is told.** With a `[notify] irreversible_command` configured,
+   the stored journal entry goes to it on stdin
+   ([README](../README.md#being-told-about-irreversible-writes)). The result
+   is `data.notified` (`enabled`, `attempted`, `ok`, `exit_status`, `error`);
+   a failed notification never fails the write.
+
+A success purges this league's cached rosters, matchups, transactions, and
+free agents, so the next read of any of them is fresh.
+
+`data` is one object with the same keys as `lineup set`, plus `notified`:
+`team_id`, `kind` (`add`), `provider_transaction_id`, `status`,
+`is_pending` (`false`), `proposed_at`, `items` (`player_id`, `type` of `add`
+or `drop`, `from_slot`, `to_slot`), `journal_entry_id`, `reversible`
+(`false`), `acknowledged_irreversible`, `cost`, `credentials`, `read_back`
+(`verified`, `diverged`), `notified`, and `dry_run`. `warnings` appears only
+when there is one.
+
+| Option | |
+|---|---|
+| `--team` | Your team's id or name. Required |
+| `--player` | The free agent to add. Required |
+| `--drop` | A player on your roster to release in the same transaction |
+| `--slot` | Lineup slot for the added player |
+| `--acknowledge-irreversible` | Why. Required to send; not needed with `--dry-run` |
+| `--dry-run` | Report items, cost, and what cannot be undone; send and journal nothing |
+
+<!-- sample: add -->
+```bash
+fantasy-sports add --team 1 --player 'Barbara Liskov' --drop 'Katherine Johnson' --acknowledge-irreversible 'Johnson is out for the season; Liskov starts this week'
+# synthetic league 99, season 2026 (replayed). Exit 0, stdout. The write host answers the community-attested FREEAGENT shape; no [notify] command is configured:
+```
+```json
+{
+  "schema": "fantasy-sports/v1",
+  "provider": "espn",
+  "league_id": "99",
+  "season": 2026,
+  "generated_at": "2026-10-15T07:03:29Z",
+  "data_as_of": "2026-09-10T12:00:00Z",
+  "data_age_seconds": 3006209,
+  "sources": [
+    {
+      "name": "mTeam+mRoster+mMatchup+mSettings+mStandings",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3006209,
+      "cached": false
+    },
+    {
+      "name": "players_wl",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3006209,
+      "cached": false
+    },
+    {
+      "name": "proTeamSchedules_wl",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3006209,
+      "cached": false
+    },
+    {
+      "name": "mDraftDetail",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3006209,
+      "cached": false
+    }
+  ],
+  "untrusted": {},
+  "raw_omitted": false,
+  "data": {
+    "team_id": "1",
+    "kind": "add",
+    "provider_transaction_id": "5d0c6e2a-7f41-4b9e-a3c8-1e6f2b9d4a70",
+    "status": "EXECUTED",
+    "is_pending": false,
+    "proposed_at": "2026-09-10T12:00:01Z",
+    "items": [
+      {
+        "player_id": "3001",
+        "type": "add",
+        "from_slot": null,
+        "to_slot": null
+      },
+      {
+        "player_id": "2003",
+        "type": "drop",
+        "from_slot": "BE",
+        "to_slot": null
+      }
+    ],
+    "journal_entry_id": "ad5e4f70-6b8c-4d9e-bfa0-2b3c4d5e6f70",
+    "reversible": false,
+    "acknowledged_irreversible": "Johnson is out for the season; Liskov starts this week",
+    "cost": {
+      "bid_amount": null,
+      "displaced_player_id": "2003"
+    },
+    "credentials": {
+      "espn_s2_age_seconds": null,
+      "warning": "credential age unknown"
+    },
+    "read_back": {
+      "verified": true,
+      "diverged": []
+    },
+    "notified": {
+      "enabled": false,
+      "attempted": false,
+      "ok": null,
+      "exit_status": null,
+      "error": null
+    },
+    "dry_run": false
+  },
+  "error": null
+}
+```
+<!-- /sample -->
+
+`--dry-run` needs no acknowledgement. It runs every preflight and the
+ownership check, then reports the items, the `cost`, the statement the gate
+would refuse with under `irreversible_because`, and a `note` that ESPN was
+not asked whether it would accept the move.
+
+<!-- sample: add.dry-run -->
+```bash
+fantasy-sports add --team 1 --player 'Barbara Liskov' --drop 'Katherine Johnson' --dry-run
+# synthetic league 99, season 2026 (replayed). Exit 0, stdout:
+```
+```json
+{
+  "schema": "fantasy-sports/v1",
+  "provider": "espn",
+  "league_id": "99",
+  "season": 2026,
+  "generated_at": "2026-10-15T07:03:29Z",
+  "data_as_of": "2026-09-10T12:00:00Z",
+  "data_age_seconds": 3006209,
+  "sources": [
+    {
+      "name": "mTeam+mRoster+mMatchup+mSettings+mStandings",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3006209,
+      "cached": false
+    },
+    {
+      "name": "players_wl",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3006209,
+      "cached": false
+    },
+    {
+      "name": "proTeamSchedules_wl",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3006209,
+      "cached": false
+    },
+    {
+      "name": "mDraftDetail",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3006209,
+      "cached": false
+    },
+    {
+      "name": "kona_player_info",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3006209,
+      "cached": false
+    },
+    {
+      "name": "mPositionalRatings",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3006209,
+      "cached": false
+    },
+    {
+      "name": "mNav",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3006209,
+      "cached": false
+    }
+  ],
+  "untrusted": {},
+  "raw_omitted": false,
+  "data": {
+    "team_id": "1",
+    "kind": "add",
+    "provider_transaction_id": null,
+    "status": null,
+    "is_pending": null,
+    "proposed_at": null,
+    "items": [
+      {
+        "player_id": "3001",
+        "type": "add",
+        "from_slot": null,
+        "to_slot": null
+      },
+      {
+        "player_id": "2003",
+        "type": "drop",
+        "from_slot": "BE",
+        "to_slot": null
+      }
+    ],
+    "journal_entry_id": null,
+    "reversible": false,
+    "acknowledged_irreversible": null,
+    "cost": {
+      "bid_amount": null,
+      "displaced_player_id": "2003"
+    },
+    "credentials": {
+      "espn_s2_age_seconds": null,
+      "warning": "credential age unknown"
+    },
+    "read_back": null,
+    "notified": null,
+    "dry_run": true,
+    "irreversible_because": "Barbara Liskov (3001) joins the roster, and undoing that later is a drop that sends the player to waivers. Katherine Johnson (2003) goes to waivers and can be claimed by any team; this cannot be reversed.",
+    "note": "Dry run: nothing was sent and nothing was journaled. The items were computed from the roster and free-agent pool just read; ESPN has no validate-only mode, so whether it would accept them (roster size, position limits, budget, waiver order) was not checked. A real run needs --acknowledge-irreversible."
+  },
+  "error": null
+}
+```
+<!-- /sample -->
+
+### `drop`
+
+Releases a player from **your own team** (a `ROSTER` transaction with one
+`DROP` item; ESPN accepts `FREEAGENT` only with exactly one `ADD`). **Irreversible**: the player goes to waivers and can be claimed
+by any team; re-adding is a separate add, and only if nobody claims the player first.
+`--player` is a player id or a name unique on your roster.
+
+The flow is `add`'s: fresh read, preflight, ownership, the acknowledgement
+gate, journal, one POST, read-back (the player must be off the roster), and
+the notify hook. `cost.displaced_player_id` is the dropped player.
+
+| Option | |
+|---|---|
+| `--team` | Your team's id or name. Required |
+| `--player` | The player to release. Required |
+| `--acknowledge-irreversible` | Why. Required to send; not needed with `--dry-run` |
+| `--dry-run` | Report the item, cost, and what cannot be undone; send and journal nothing |
+
+<!-- sample: drop.dry-run -->
+```bash
+fantasy-sports drop --team 1 --player 2003 --dry-run
+# synthetic league 99, season 2026 (replayed). Exit 0, stdout:
+```
+```json
+{
+  "schema": "fantasy-sports/v1",
+  "provider": "espn",
+  "league_id": "99",
+  "season": 2026,
+  "generated_at": "2026-10-15T07:03:29Z",
+  "data_as_of": "2026-09-10T12:00:00Z",
+  "data_age_seconds": 3006209,
+  "sources": [
+    {
+      "name": "mTeam+mRoster+mMatchup+mSettings+mStandings",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3006209,
+      "cached": false
+    },
+    {
+      "name": "players_wl",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3006209,
+      "cached": false
+    },
+    {
+      "name": "proTeamSchedules_wl",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3006209,
+      "cached": false
+    },
+    {
+      "name": "mDraftDetail",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3006209,
+      "cached": false
+    },
+    {
+      "name": "mNav",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3006209,
+      "cached": false
+    }
+  ],
+  "untrusted": {},
+  "raw_omitted": false,
+  "data": {
+    "team_id": "1",
+    "kind": "drop",
+    "provider_transaction_id": null,
+    "status": null,
+    "is_pending": null,
+    "proposed_at": null,
+    "items": [
+      {
+        "player_id": "2003",
+        "type": "drop",
+        "from_slot": "BE",
+        "to_slot": null
+      }
+    ],
+    "journal_entry_id": null,
+    "reversible": false,
+    "acknowledged_irreversible": null,
+    "cost": {
+      "bid_amount": null,
+      "displaced_player_id": "2003"
+    },
+    "credentials": {
+      "espn_s2_age_seconds": null,
+      "warning": "credential age unknown"
+    },
+    "read_back": null,
+    "notified": null,
+    "dry_run": true,
+    "irreversible_because": "Katherine Johnson (2003) goes to waivers and can be claimed by any team; this cannot be reversed.",
+    "note": "Dry run: nothing was sent and nothing was journaled. The items were computed from the roster and free-agent pool just read; ESPN has no validate-only mode, so whether it would accept them (roster size, position limits, budget, waiver order) was not checked. A real run needs --acknowledge-irreversible."
+  },
+  "error": null
+}
+```
+<!-- /sample -->
+
+Without `--acknowledge-irreversible` it sends nothing; the refusal is in
+[`CONFIG_INVALID`](#config_invalid--exit-6).
+
+### `claim`
+
+Submits a waiver claim for a player on waivers, optionally with a FAAB bid
+and the player to drop if it processes (a `WAIVER` transaction, with
+`bidAmount` only when `--bid` is given). **Irreversible once processed**: a processed claim consumes
+waiver priority, and FAAB where the league uses it, and restoring the roster
+later gives neither back.
+
+`--player` must be in this week's pool with ESPN status on waivers; a free
+agent is refused (use `add`). `--bid` is a whole number of 0 or more. Omit it
+in a league without an acquisition budget: ESPN rejects any bid there, even
+`1`, as `TRAN_ACQUISITION_BUDGET_NOT_SUPPORTED`. The command reads the
+league's `acquisitionSettings` from the read it already made, and refuses a
+`--bid` in such a league with `CONFIG_INVALID` before anything is sent. A
+claim's `--dry-run` reports `acquisition_type` and `uses_budget`, `null` when
+ESPN does not say, so an agent learns the rule without a failed attempt.
+`--drop` is as for `add`.
+
+The flow is `add`'s, with two differences. ESPN answers a claim
+`is_pending: true`: nothing changes on the roster until waivers process, and
+`provider_transaction_id` is the id `claim cancel` will take (#109). The
+read-back therefore looks in this period's `transactions` for a pending
+waiver claim by your team that matches everything you submitted: the player,
+the `--drop`, and the bid, which ESPN records as `0` when none was sent.
+Exactly one match is `verified: true` with `matched_by`. Several identical
+pending claims are `verified: null`, because this one cannot be told apart
+from an earlier one. No match is `verified: null` with a `note`, never
+`true`: `transactions` does not carry ESPN's transaction ids, so a claim it
+does not list is unverified, not missing. A match proves the claim was
+queued and nothing later: a cancel is a new transaction, and the claim's own
+row keeps reading `PENDING` after it. A timed-out claim is never re-sent,
+because a second claim is a second bid.
+
+`cost.bid_amount` is the bid, `null` without one; `cost.displaced_player_id`
+is `--drop`.
+
+| Option | |
+|---|---|
+| `--team` | Your team's id or name. Required |
+| `--player` | The player on waivers to claim. Required |
+| `--bid` | FAAB bid, 0 or more. Omit in a league without a budget |
+| `--drop` | A player on your roster to release if the claim processes |
+| `--acknowledge-irreversible` | Why. Required to send; not needed with `--dry-run` |
+| `--dry-run` | Report items, cost, and what cannot be undone; send and journal nothing |
+
+<!-- sample: claim.dry-run -->
+```bash
+fantasy-sports claim --team 1 --player 'Radia Perlman' --bid 7 --dry-run
+# synthetic league 99, season 2026 (replayed). Exit 0, stdout:
+```
+```json
+{
+  "schema": "fantasy-sports/v1",
+  "provider": "espn",
+  "league_id": "99",
+  "season": 2026,
+  "generated_at": "2026-10-15T07:13:19Z",
+  "data_as_of": "2026-09-10T12:00:00Z",
+  "data_age_seconds": 3006799,
+  "sources": [
+    {
+      "name": "mTeam+mRoster+mMatchup+mSettings+mStandings",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3006799,
+      "cached": false
+    },
+    {
+      "name": "players_wl",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3006799,
+      "cached": false
+    },
+    {
+      "name": "proTeamSchedules_wl",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3006799,
+      "cached": false
+    },
+    {
+      "name": "mDraftDetail",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3006799,
+      "cached": false
+    },
+    {
+      "name": "kona_player_info",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3006799,
+      "cached": false
+    },
+    {
+      "name": "mPositionalRatings",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3006799,
+      "cached": false
+    },
+    {
+      "name": "mNav",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3006799,
+      "cached": false
+    }
+  ],
+  "untrusted": {},
+  "raw_omitted": false,
+  "data": {
+    "team_id": "1",
+    "kind": "claim",
+    "provider_transaction_id": null,
+    "status": null,
+    "is_pending": null,
+    "proposed_at": null,
+    "items": [
+      {
+        "player_id": "3002",
+        "type": "add",
+        "from_slot": null,
+        "to_slot": null
+      }
+    ],
+    "journal_entry_id": null,
+    "reversible": false,
+    "acknowledged_irreversible": null,
+    "cost": {
+      "bid_amount": 7,
+      "displaced_player_id": null
+    },
+    "credentials": {
+      "espn_s2_age_seconds": null,
+      "warning": "credential age unknown"
+    },
+    "read_back": null,
+    "notified": null,
+    "dry_run": true,
+    "irreversible_because": "A processed claim for Radia Perlman (3002) consumes waiver priority (and FAAB where enabled), and restoring the roster later gives neither back.",
+    "acquisition_type": null,
+    "uses_budget": true,
+    "note": "Dry run: nothing was sent and nothing was journaled. The items were computed from the roster and free-agent pool just read; ESPN has no validate-only mode, so whether it would accept them (roster size, position limits, budget, waiver order) was not checked. A real run needs --acknowledge-irreversible."
+  },
+  "error": null
+}
+```
+<!-- /sample -->
+
 ### `journal list`
 
 The mutation journal, newest first: every write this tool attempted, who ESPN
@@ -3298,6 +3822,52 @@ fantasy-sports free-agents --pos PUNTER --week 2
     "remediation": "Pass a position ESPN recognises (see the valid values above), or omit --pos to get ESPN's default set.",
     "details": {
       "pos": "PUNTER",
+      "kind": "argument"
+    },
+    "health": null
+  }
+}
+```
+<!-- /sample -->
+
+An irreversible write (`add`, `drop`, `claim`) without
+`--acknowledge-irreversible` is the same code with `details.kind` of
+`argument`. The message states what that one invocation cannot undo, and
+`details` carries the same statement and the move's `cost`. Nothing was
+sent or journaled; pass the flag with a reason, or `--dry-run`.
+
+<!-- sample: error-config-invalid.acknowledge -->
+```bash
+fantasy-sports drop --team 1 --player 'Katherine Johnson'
+# synthetic league 99, season 2026 (replayed). Exit 6, stderr. An irreversible write without --acknowledge-irreversible; nothing is sent:
+```
+```json
+{
+  "schema": "fantasy-sports/v1",
+  "provider": null,
+  "league_id": null,
+  "season": null,
+  "generated_at": "2026-10-15T07:03:29Z",
+  "data_as_of": null,
+  "data_age_seconds": null,
+  "sources": [],
+  "untrusted": {},
+  "raw_omitted": false,
+  "data": null,
+  "error": {
+    "code": "CONFIG_INVALID",
+    "message": "This drop cannot be undone, and --acknowledge-irreversible was not given. Katherine Johnson (2003) goes to waivers and can be claimed by any team; this cannot be reversed.",
+    "retryable": false,
+    "agent_action": "Ask the human to fix the input named in the message \u2014 a config value or a command argument. Retrying unchanged cannot work.",
+    "remediation": "Pass --acknowledge-irreversible \"<why>\" with the reason for this move; it is journaled verbatim. An autonomous agent must clear /sanity-gate before passing it. Use --dry-run to preview the move without the flag.",
+    "details": {
+      "flag": "--acknowledge-irreversible",
+      "move": "drop",
+      "irreversible_because": "Katherine Johnson (2003) goes to waivers and can be claimed by any team; this cannot be reversed.",
+      "cost": {
+        "bid_amount": null,
+        "displaced_player_id": "2003"
+      },
       "kind": "argument"
     },
     "health": null

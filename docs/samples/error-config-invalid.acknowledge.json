@@ -1,0 +1,31 @@
+{
+  "schema": "fantasy-sports/v1",
+  "provider": null,
+  "league_id": null,
+  "season": null,
+  "generated_at": "2026-10-15T07:03:29Z",
+  "data_as_of": null,
+  "data_age_seconds": null,
+  "sources": [],
+  "untrusted": {},
+  "raw_omitted": false,
+  "data": null,
+  "error": {
+    "code": "CONFIG_INVALID",
+    "message": "This drop cannot be undone, and --acknowledge-irreversible was not given. Katherine Johnson (2003) goes to waivers and can be claimed by any team; this cannot be reversed.",
+    "retryable": false,
+    "agent_action": "Ask the human to fix the input named in the message \u2014 a config value or a command argument. Retrying unchanged cannot work.",
+    "remediation": "Pass --acknowledge-irreversible \"<why>\" with the reason for this move; it is journaled verbatim. An autonomous agent must clear /sanity-gate before passing it. Use --dry-run to preview the move without the flag.",
+    "details": {
+      "flag": "--acknowledge-irreversible",
+      "move": "drop",
+      "irreversible_because": "Katherine Johnson (2003) goes to waivers and can be claimed by any team; this cannot be reversed.",
+      "cost": {
+        "bid_amount": null,
+        "displaced_player_id": "2003"
+      },
+      "kind": "argument"
+    },
+    "health": null
+  }
+}

@@ -32,10 +32,13 @@ def clean_registry():
 
 #: The v0.1 command surface, exactly as ARCHITECTURE §12 lists it, plus
 #: `doctor` (jwulff/fantasy-sports#10, ADR-0005 §11.4) and `auth logout`
-#: (jwulff/fantasy-sports#62), and the first two writes: `lineup set` (#15) and
-#: `journal reverse` (#16).
+#: (jwulff/fantasy-sports#62), the first two writes: `lineup set` (#15) and
+#: `journal reverse` (#16), and the irreversible three: `add`, `drop`, `claim` (#18).
 V01_SURFACE = frozenset(
     {
+        "add",
+        "claim",
+        "drop",
         "auth login",
         "auth logout",
         "auth status",
@@ -70,7 +73,8 @@ def test_the_v01_surface_is_registered_and_nothing_else_is():
     fourth and fifth, the read side of the mutation journal
     (jwulff/fantasy-sports#16). `lineup set` and `journal reverse` are the
     first writes, from the write-surface plan (jwulff/fantasy-sports#105):
-    the reversible half, ahead of `add`/`drop`/`claim` (#18).
+    the reversible half, ahead of `add`/`drop`/`claim`, which #18 added
+    behind an acknowledgement gate.
     """
     assert set(REGISTRY) == V01_SURFACE
 

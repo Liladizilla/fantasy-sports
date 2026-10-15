@@ -1393,8 +1393,8 @@ def test_a_cancel_is_the_captured_body_and_returns_a_new_canceled_transaction():
     [
         ("p3-waiver-claim-no-bid-no-drop", "TRAN_ROSTER_LIMIT_EXCEEDED_ONE", "roster_full"),
         ("p6c-roster-drop-player-not-on-team", "TRAN_PLAYER_NOT_ON_TEAM", "already_dropped"),
-        ("p1-freeagent-add-no-drop", "TRAN_PLAYER_NOT_FREEAGENT", "unknown"),
-        ("p6d-freeagent-add-rostered-elsewhere", "TRAN_PLAYER_NOT_AVAILABLE", "unknown"),
+        ("p1-freeagent-add-no-drop", "TRAN_PLAYER_NOT_FREEAGENT", "player_on_waivers"),
+        ("p6d-freeagent-add-rostered-elsewhere", "TRAN_PLAYER_NOT_AVAILABLE", "player_unavailable"),
         ("p2-waiver-claim-no-drop-full-roster", "TRAN_ACQUISITION_BUDGET_NOT_SUPPORTED", "unknown"),
         ("p6a-waiver-bid-1000", "TRAN_ACQUISITION_BUDGET_NOT_SUPPORTED", "unknown"),
         ("p6b-drop-player-not-on-team", "TRAN_INVALID_ITEM_TYPE_COUNT", "unknown"),

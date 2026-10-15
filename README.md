@@ -25,10 +25,11 @@ The read path is complete for ESPN: nine commands — `league info`, `teams`,
 `transactions`, and the `raw` escape hatch — all return the versioned
 envelope described below, backed by an offline test suite and a daily
 drift canary. Every command's output, in every mode, is in the
-[command reference](docs/commands.md). Writes have started with the
-reversible kind: `lineup set` changes your own team's lineup, and `journal
-reverse` undoes it (see [Writing](#writing)). Adds, drops, waiver claims, and
-trades are tracked in the [write-surface epic](https://github.com/jwulff/fantasy-sports/issues/105).
+[command reference](docs/commands.md). Writes cover the reversible kind,
+where `lineup set` changes your own team's lineup and `journal reverse` undoes
+it, and the irreversible kind: `add`, `drop`, and `claim`, each behind an
+acknowledgement flag (see [Writing](#writing)). Trades and pending-claim
+management are tracked in the [write-surface epic](https://github.com/jwulff/fantasy-sports/issues/105).
 The package is not on PyPI (`0.1.0.dev0`); install from git as below.
 
 ## Install
@@ -509,6 +510,45 @@ fantasy-sports journal reverse --id JOURNAL_ENTRY_ID
 `journal list` shows every write this machine made, who ESPN says made it,
 and how it ended. `doctor` reports any entry still `pending`: a write that
 may have gone out without its outcome being recorded.
+
+### Irreversible writes: add, drop, claim
+
+A dropped player can be claimed by another team within seconds. A processed
+waiver claim spends priority and FAAB that restoring the roster does not give
+back. Nothing this tool does can undo either, so these three commands add one
+step to the loop, and an agent running them unattended follows it every time:
+
+```bash
+# 1. Read. 2. Preview: items, cost, and exactly what cannot be undone.
+fantasy-sports free-agents --pos WR --league my-league --fresh
+fantasy-sports add --team "My Team" --player "Player C" --drop "Player A" --dry-run
+# 3. Clear /sanity-gate on the preview (an autonomous agent must; a human decides).
+# 4. Write, saying why. 5. Check that the owner was told.
+fantasy-sports add --team "My Team" --player "Player C" --drop "Player A" --acknowledge-irreversible "A is out; gate PROCEED"
+```
+
+- **No flag, no write.** Without `--acknowledge-irreversible "<why>"`, `add`,
+  `drop`, and `claim` stop with `CONFIG_INVALID` and say what this move would
+  lose: the dropped player goes to waivers, the claim spends priority and
+  FAAB. The reason is journaled verbatim and echoed as
+  `acknowledged_irreversible`, so a write nobody justified cannot hide.
+- **The flag is not the gate.** The CLI cannot run `/sanity-gate` or check
+  that one ran. An autonomous agent clears the gate on the `--dry-run` output
+  first and passes the flag only on `PROCEED`. The flag makes a skipped gate
+  visible in the journal; it does not replace one.
+- **`--dry-run` needs no flag.** It reports the items, the `cost` (the bid,
+  the player displaced), and the same statement under
+  `irreversible_because`. It does not ask ESPN whether it would accept.
+- **Check `notified` after it fires.** With a `[notify]` command configured
+  (below), `data.notified.ok` is `true` once the owner's hook ran. A failed
+  notification never fails the write; treat `ok: false` as a reason to tell
+  the owner some other way.
+- **A claim is pending, not done.** It returns `is_pending: true` and the
+  transaction id. `read_back.verified` is `null` when the pending row cannot
+  be seen, which means unverified, not missing.
+- **Never retry an unknown outcome.** A timeout is `PROVIDER_UNAVAILABLE`
+  with `transaction_state: "unknown"`. Read `transactions` before anything
+  else, because a second claim is a second bid.
 
 ### Being told about irreversible writes
 

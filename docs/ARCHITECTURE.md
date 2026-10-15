@@ -252,7 +252,8 @@ tell them apart without a second exit status to branch on.
 **`WRITE_REJECTED` is one code with a closed `details.kind`, not one code per
 reason (ADR-0010).** `kind` is one of `roster_lock`, `slot_limit`, `same_slot`,
 `not_current_period`, `budget_exceeded`, `position_limit`, `already_dropped`,
-`roster_full`, `not_owned`, `auth`, `unknown`. The payload also carries
+`roster_full`, `player_on_waivers`, `player_unavailable`, `not_owned`, `auth`,
+`unknown`. The payload also carries
 `provider_type` (ESPN's `TRAN_*` string verbatim, so a reason we have not
 mapped is reported as `unknown` rather than lost), `http_status`, `team_id`,
 and `transaction_applied`. `not_owned` is ours, not ESPN's: the client-side
@@ -465,6 +466,34 @@ layer owns the flow; the adapter owns the wire:
 target, journaled as kind `reverse` with `reverses` set, against the league
 profile whose id the entry names. It refuses add, drop, claim, and cancel
 entries as `NOT_AVAILABLE` before resolving a provider at all.
+
+**`add`, `drop`, `claim` (#18).** The irreversible class, on the same flow
+(`execute_move` in `commands/moves.py`; the ownership check and the
+journal-closing helpers are shared with `lineup set` in `commands/writes.py`).
+What differs:
+
+- **An acknowledgement gate before the journal.** Without
+  `--acknowledge-irreversible "<why>"` the command is `CONFIG_INVALID`
+  (`kind: "argument"`) stating what this invocation cannot undo. The reason is
+  journaled in `request` and echoed in `data.acknowledged_irreversible`.
+  ADR-0006's fourth gate survives this way: the CLI cannot run
+  `/sanity-gate` or verify it ran, so it makes a bypass visible instead, and
+  the README tells an autonomous agent to clear the gate before the flag.
+- **The preflight reads the free-agent pool.** `--player` must be in this
+  week's pool; ESPN's pool status refuses an add of a player on waivers and a
+  claim of a free agent before anything is sent.
+- **The journal records the cost**: `reversible: false`, `cost.bid_amount`,
+  `cost.displaced_player_id`, the dropped player's slot and the added
+  player's pool status as `prior_state`.
+- **Read-back follows `is_pending`.** An executed move re-reads the roster
+  (added present, dropped absent, else `WRITE_DIVERGED`). A pending claim
+  looks for its row in `transactions`; since the normalized row carries no
+  ESPN transaction id, not finding it is `verified: null`, never a
+  verification.
+- **The owner is told** (#113): after the entry closes `executed` or
+  `diverged`, `notify_irreversible` runs with the stored entry. Its result is
+  `data.notified`, or `details.notified` on a `WRITE_DIVERGED`; it never
+  fails the write.
 
 ---
 

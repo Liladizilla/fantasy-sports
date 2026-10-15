@@ -10,6 +10,29 @@ football API, distributed via `uv tool install fantasy-sports`.
 
 ### Added
 
+- **`add`, `drop`, and `claim`, the irreversible writes** — `add --team T
+  --player P [--drop D] [--slot S]` sends a `FREEAGENT` transaction with one
+  `ADD` (and a `DROP` with `--drop`),
+  `drop --team T --player P` a `ROSTER` transaction with one `DROP` item, and
+  `claim --team T --player P [--bid N] [--drop D]` a `WAIVER` claim, with
+  `bidAmount` only when `--bid` is given. Each refuses with
+  `CONFIG_INVALID` (`kind: "argument"`) unless `--acknowledge-irreversible
+  "<why>"` carries a non-blank reason, and the refusal states what that move
+  cannot undo. The reason is journaled verbatim and echoed in
+  `acknowledged_irreversible`. Players resolve by id or unambiguous name
+  against this week's free-agent pool or the team's roster; an add of a
+  player on waivers, a claim of a free agent, and an ineligible `--slot` are
+  refused before sending. The journal records `reversible: false` and the
+  `cost` (`bid_amount`, `displaced_player_id`). An executed move is read back
+  against the roster (`WRITE_DIVERGED` on a mismatch); a pending claim
+  reports `is_pending: true` and looks for its row in `transactions`
+  (`read_back.verified` is `null` when it cannot see one). Every write that
+  took effect runs the `[notify]` hook with the stored entry and reports
+  `notified`. `--dry-run` needs no flag and reports `irreversible_because`.
+  A `--bid` in a league without an acquisition budget is refused before
+  sending, and a claim's dry run reports `acquisition_type` and
+  `uses_budget`. `WRITE_REJECTED` gains two kinds, `player_on_waivers` and
+  `player_unavailable` (ADR-0010 amended) (#18).
 - **Captured ESPN add/drop/waiver shapes** — `docs/research/06-espn-add-drop-surface.md`
   and 13 redacted captures from a throwaway league's post-draft waiver window.
   `move_players` gains `waiver=True`, a claim with no `bidAmount`, because a

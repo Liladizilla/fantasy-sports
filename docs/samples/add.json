@@ -1,0 +1,83 @@
+{
+  "schema": "fantasy-sports/v1",
+  "provider": "espn",
+  "league_id": "99",
+  "season": 2026,
+  "generated_at": "2026-10-15T07:03:29Z",
+  "data_as_of": "2026-09-10T12:00:00Z",
+  "data_age_seconds": 3006209,
+  "sources": [
+    {
+      "name": "mTeam+mRoster+mMatchup+mSettings+mStandings",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3006209,
+      "cached": false
+    },
+    {
+      "name": "players_wl",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3006209,
+      "cached": false
+    },
+    {
+      "name": "proTeamSchedules_wl",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3006209,
+      "cached": false
+    },
+    {
+      "name": "mDraftDetail",
+      "fetched_at": "2026-09-10T12:00:00Z",
+      "age_seconds": 3006209,
+      "cached": false
+    }
+  ],
+  "untrusted": {},
+  "raw_omitted": false,
+  "data": {
+    "team_id": "1",
+    "kind": "add",
+    "provider_transaction_id": "5d0c6e2a-7f41-4b9e-a3c8-1e6f2b9d4a70",
+    "status": "EXECUTED",
+    "is_pending": false,
+    "proposed_at": "2026-09-10T12:00:01Z",
+    "items": [
+      {
+        "player_id": "3001",
+        "type": "add",
+        "from_slot": null,
+        "to_slot": null
+      },
+      {
+        "player_id": "2003",
+        "type": "drop",
+        "from_slot": "BE",
+        "to_slot": null
+      }
+    ],
+    "journal_entry_id": "ad5e4f70-6b8c-4d9e-bfa0-2b3c4d5e6f70",
+    "reversible": false,
+    "acknowledged_irreversible": "Johnson is out for the season; Liskov starts this week",
+    "cost": {
+      "bid_amount": null,
+      "displaced_player_id": "2003"
+    },
+    "credentials": {
+      "espn_s2_age_seconds": null,
+      "warning": "credential age unknown"
+    },
+    "read_back": {
+      "verified": true,
+      "diverged": []
+    },
+    "notified": {
+      "enabled": false,
+      "attempted": false,
+      "ok": null,
+      "exit_status": null,
+      "error": null
+    },
+    "dry_run": false
+  },
+  "error": null
+}

@@ -311,6 +311,8 @@ WRITE_REJECTED_KINDS: Final[tuple[str, ...]] = (
     "position_limit",
     "already_dropped",
     "roster_full",
+    "player_on_waivers",
+    "player_unavailable",
     "not_owned",
     "auth",
     "unknown",
@@ -322,6 +324,10 @@ provider's own string in ``provider_type``, so it is reported rather than lost
 and adding it later is not an API change. ``"not_owned"`` is ours, not ESPN's:
 the client-side guard that refuses a write for a team the session does not
 own, because ESPN does not (``docs/research/05-espn-write-surface.md`` §6).
+``player_on_waivers`` (re-plan: claim instead) and ``player_unavailable``
+(re-plan: pick another player; this one is on another roster) were added for
+#18, because neither re-plan fits an existing kind (ADR-0010, amended
+2026-10-15).
 """
 
 
