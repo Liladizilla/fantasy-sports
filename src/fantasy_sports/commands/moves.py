@@ -433,15 +433,13 @@ def plan_move(
         added_id, added_label = str(agent.provider_id), _label(agent.player)
         status = _pool_status(agent)
         if kind == "add" and status == _POOL_WAIVERS:
+            # Only a league known to use an acquisition budget takes --bid;
+            # any bid elsewhere is TRAN_ACQUISITION_BUDGET_NOT_SUPPORTED.
+            bid_flag = " --bid N" if (acquisition or {}).get("uses_budget") is True else ""
             raise _argument(
                 f"{added_label} is on waivers, so it cannot be added outright.",
-                "Submit a waiver claim instead: `fantasy-sports claim --team ... --player "
-                f"{added_id}`"
-                + (
-                    " with `--bid N` if this league uses an acquisition budget."
-                    if (acquisition or {}).get("uses_budget") is True
-                    else "."
-                ),
+                "Submit a waiver claim instead: "
+                f"`fantasy-sports claim --team ... --player {added_id}{bid_flag}`.",
                 details={"player_id": added_id, "pool_status": status},
             )
         if kind == "claim" and status == _POOL_FREE_AGENT:
